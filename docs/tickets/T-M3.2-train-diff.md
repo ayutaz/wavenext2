@@ -44,6 +44,7 @@ T-M2.5 で確立した `train_gan_step(...) -> dict[str, float]` 公開関数化
 ### ゴール
 - [ ] `src/wavenext2/train/train_diff.py` に `main()` (click CLI entry point) が実装され `uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml --sub-model {1,2,3,4}` で起動可能
 - [ ] `--sub-model` 引数で **1 sub-model 単独訓練** (他 3 sub-model は instantiate しない、メモリ効率 / 訓練独立性のため)
+- [ ] **【M3 phase review 採用昇格】lazy instantiation 必須**: `DiffWaveNext2.from_config(cfg["model"], only_sub_model=k)` で **k 番目 sub-model のみ instantiate** (1×14.42M、4×14.42M instantiate を回避)。理由: メモリ消費 1/4、モデル init 時間 1/4、4 並列 CLI 起動時の `torch.cuda.empty_cache()` ハック不要 (T-M3.1 §9.1 で `only_sub_model` 採用要請と同期)
 - [ ] **公開関数 `train_diff_step(model, opt, batch, k, cfg) -> dict[str, float]`**: T-M2.5 `train_gan_step` と signature 統一 (1 step backward + loss dict 返却、T-M3.5 smoke / `tests/conftest.py` fixture 共用 / 将来 Lightning 移行で再利用)
 - [ ] Optimizer: `Adam(sub_model_k.parameters(), lr=2e-4, betas=[0.9, 0.98], weight_decay=0.0)` (AdamW ではなく Adam、wd=0 は論文準拠)
 - [ ] **Scheduler 不使用** (Diff 側は固定 lr。T-M2.5 の `InverseLR` は import しない)
@@ -52,13 +53,15 @@ T-M2.5 で確立した `train_gan_step(...) -> dict[str, float]` 公開関数化
   1. `eps ~ N(0, I)` (shape: `(B, segment_length)`)
   2. `c = model.sample_noise_level(k, batch_size)` → shape `(B,)`、`= √(1-ᾱ_t)`、band `[L_k, U_k]` uniform sampling (T-M3.1 §B1)
   3. `abar = 1.0 - c**2` (= `ᾱ_t`)
-  4. `x_t = sqrt(abar).view(-1, 1) * x_gt + c.view(-1, 1) * eps` (DDPM 標準形)
-  5. `eps_pred = model.sub_models[k-1](mel, x_t, c)` (1-indexed → 0-indexed)
+  4. `x_t = sqrt(abar).view(-1, 1) * x_gt + c.view(-1, 1) * eps` (DDPM 標準形、**c/abar は fp32 強制** ← bf16 で c≈1.0 が underflow する罠、§6.1 Critical)
+  5. `eps_pred = model.sub_models[k-1](mel, x_t, c * c_rescale)` (1-indexed → 0-indexed、conditioning 入力に `c_rescale ∈ {1.0, 1000.0}` を乗算)
   6. `loss = F.mse_loss(eps_pred, eps)`
 - [ ] 4 sub-model それぞれ独立 checkpoint: `checkpoints/diff/sub_{1,2,3,4}.pt`、別々の `--sub-model k` invocation で独立保存
 - [ ] Gradient clip: `clip_grad_norm_(max_norm=1.0)` (`docs/training.md` §3.4)
 - [ ] EMA: 不使用 (T-M2.5 と同様)
 - [ ] Mixed precision: fp32 default、`--amp` で bf16 切替 (fp16 不採用 ← noise level conditioning の sinusoidal embedding underflow リスク、T-M1.5 §6.1)
+- [ ] **【M3 phase review 採用昇格】`cfg["model"]["noise_emb"]["c_rescale"]` で `{1.0, 1000.0}` 切替可能化**: T-M1.5 で議論された `c * 1000` 案を YAML config 経由で ablation 可能にし、T-M3.5 smoke の ablation pathway を本チケットで用意 (default は `1.0`、`1000.0` は smoke 比較用、T-M1.5 §9.1 連動)
+- [ ] **【M3 phase review 採用昇格】Validation を 3 点 fixed evaluation** (`c ∈ {L, (L+U)/2, U}` の 3 点): 単一点 (band 中点) では band 境界での過適合検知に弱いため、`min/mean/max` MSE を TensorBoard 3 系列でログ (`sub_{k}/val/mse_at_L`, `sub_{k}/val/mse_at_mid`, `sub_{k}/val/mse_at_U`)
 - [ ] Logging: TensorBoard に `loss`, `lr`, `noise_level_histogram` (band 内 uniform sampling 確認用), `mel`, `x_t`, `eps_pred`, `eps_gt`, `audio_sample` (validation 時のみ)、scalar tag は `sub_{k}/loss` 等で sub-model 別に分離
 - [ ] Validation (T-M2.5 から流用): 10k step ごとに 100 utterances (`val.tsv` speaker-balanced) で MSE 計算
 - [ ] Checkpoint: 10k step ごと `step_{step}_sub_{k}.pt`、best validation MSE で `sub_{k}.pt` (= `best.pt` 相当) 更新、atomic rename
@@ -75,7 +78,7 @@ T-M2.5 で確立した `train_gan_step(...) -> dict[str, float]` 公開関数化
   - `src/wavenext2/train/train_diff.py` (本実装、`main()` + `train_diff_step()` 公開関数)
   - `tests/test_train_diff.py` (smoke step / 100 step / band sampling / 独立 ckpt の各テスト)
 - 編集 (T-M2.5 で生成、本チケットで拡張):
-  - `src/wavenext2/utils/training_loop.py` (T-M2.5 §8.1 採用昇格、M2.6 smoke pass 直後に T-M2.5 から refactor 済み想定。本チケットで Diff 側からも import 可能であることを検証)
+  - `src/wavenext2/utils/training_loop.py` (T-M2.5 §8.1 採用昇格、M2.6 smoke pass 直後に T-M2.5 から refactor 済み想定。本チケットで Diff 側からも import 可能であることを検証 + **【M3 phase review 採用】`run_validation` を dict[str, tensor] 戻り値対応に拡張** (3 点 evaluation 用))
   - `src/wavenext2/train/__init__.py` (`__all__` に `main_diff`, `train_diff_step` を追加、`from .train_diff import main as main_diff, train_diff_step`)
   - `configs/diff_wavenext2.yaml` (T-M0.2 で雛形生成済、本チケットで `train`/`validation`/`checkpoint`/`logging` セクション値確定)
   - `pyproject.toml` `[project.scripts]` に `train-diff = "wavenext2.train.train_diff:main"` 追加 (任意)
@@ -162,13 +165,16 @@ def main(config_path: str, sub_model_k: int, resume_path: str | None,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if amp else torch.float32
 
-    # ===== Model =====
-    # 重要: DiffWaveNext2 全体を instantiate するが、訓練対象は sub_models[k-1] のみ
-    # 他 3 sub-model は parameter が opt に渡らないため update されない
-    # メモリ節約のため `DiffWaveNext2.from_config(cfg["model"], only_sub_model=k)` で
-    # 1 sub-model のみ instantiate するオプションを T-M3.1 へ申し送り (§9.1)
-    model = DiffWaveNext2.from_config(cfg["model"]).to(device)
+    # ===== Model (lazy instantiation: k 番目のみ) =====
+    # 【M3 phase review 採用昇格】DiffWaveNext2 全体ではなく only_sub_model=k で
+    # 1 sub-model のみ instantiate (メモリ 1/4、init 時間 1/4)
+    # T-M3.1 が `from_config(cfg, only_sub_model: int | None = None)` を提供
+    # only_sub_model=k の場合、model.sub_models は ModuleList で 4 要素のうち
+    # k-1 番目のみが SubModelDiff、他は None placeholder (or sparse dict)
+    model = DiffWaveNext2.from_config(cfg["model"], only_sub_model=sub_model_k).to(device)
     sub_model_k_module = model.sub_models[sub_model_k - 1]  # 1-indexed → 0-indexed
+    assert sub_model_k_module is not None, \
+        f"sub_models[{sub_model_k - 1}] is None (only_sub_model={sub_model_k} で正しく instantiate されていない)"
 
     # ===== Optimizer (k-th sub-model のみ) =====
     opt = Adam(
@@ -238,17 +244,21 @@ def main(config_path: str, sub_model_k: int, resume_path: str | None,
         if state.step % 10000 == 0:
             writer.flush()
 
-        # --- Validation ---
+        # --- Validation (3 点 fixed evaluation: c ∈ {L, mid, U}) ---
         if state.step > 0 and state.step % cfg["validation"]["interval_steps"] == 0:
-            val_mse = run_validation(
+            # _validation_forward は dict (mse_at_L/mid/U + mse) を返す
+            # run_validation 側で 3 系列を sub_{k}/val/mse_at_{L,mid,U} へ、
+            # best 判定は 3 点平均 `mse` を使用
+            val_metrics = run_validation(
                 model_fn=lambda b: _validation_forward(model, b, sub_model_k, cfg),
                 loader=val_loader,
-                metric_fn=F.mse_loss,
+                metric_fn=None,   # model_fn が dict を直接返すため metric_fn 不要
                 device=device,
                 writer=writer,
                 step=state.step,
                 tag_prefix=f"sub_{sub_model_k}/val",
             )
+            val_mse = val_metrics["mse"]  # 3 点平均
             if val_mse < state.best_val_metric:
                 state.best_val_metric = val_mse
                 # best ckpt: `sub_{k}.pt` (atomic rename)
@@ -289,12 +299,13 @@ def train_diff_step(
     T-M3.5 smoke / 将来の Lightning 移行で再利用される。
 
     Args:
-        model: DiffWaveNext2 (全 4 sub-model 保持、訓練は k-th のみ)
+        model: DiffWaveNext2 (lazy instantiation で sub_models[k-1] のみ実体、
+               他は None placeholder。訓練は k-th のみ)
         opt: Adam (sub_models[k-1].parameters() に紐付け済)
         batch: {"mel": (B, 128, T_mel), "audio": (B, segment_length), ...}
         k: 訓練対象 sub-model index (1..4、1-indexed)
-        cfg: YAML config dict
-        amp: bf16 mixed precision 切替
+        cfg: YAML config dict (`model.noise_emb.c_rescale` で conditioning 入力 scale)
+        amp: bf16 mixed precision 切替 (c / abar 計算は fp32 強制、bf16 underflow 回避)
         dtype: torch.bfloat16 if amp else torch.float32
 
     Returns:
@@ -323,18 +334,29 @@ def train_diff_step(
     c = model.sample_noise_level(k, B).to(device)         # (B,)
 
     # --- 3. abar = 1 - c**2 = ᾱ_t ---
-    abar = 1.0 - c ** 2                                    # (B,)
-    sqrt_abar = torch.sqrt(abar)                           # (B,)
-    sqrt_one_minus_abar = c                                # (B,) (= √(1-ᾱ))
+    # 【M3 phase review 採用 / Critical】 bf16 で c=0.99995 (sub-model 1) が 1.0 に
+    # 丸まり、abar = 0.0 → √abar = 0 → x_t に x_gt 成分が消失する罠を回避するため、
+    # c と abar の演算は強制 fp32 (bf16 mantissa 8-bit では 0.99995 を表現不能)
+    with torch.autocast(device_type=device.type, enabled=False):
+        c_fp32 = c.float()
+        abar = 1.0 - c_fp32 ** 2                           # (B,) fp32
+        sqrt_abar = torch.sqrt(abar)                       # (B,) fp32
+        sqrt_one_minus_abar = c_fp32                       # (B,) fp32 (= √(1-ᾱ))
 
     # --- 4. x_t = √ᾱ * x_0 + √(1-ᾱ) * ε (DDPM 標準形) ---
-    # broadcast: (B,) -> (B, 1)
-    x_t = sqrt_abar.unsqueeze(-1) * x_gt + sqrt_one_minus_abar.unsqueeze(-1) * eps
+    # broadcast: (B,) -> (B, 1)、x_gt の dtype に cast
+    x_t = (sqrt_abar.to(x_gt.dtype).unsqueeze(-1) * x_gt
+           + sqrt_one_minus_abar.to(x_gt.dtype).unsqueeze(-1) * eps)
 
     # --- 5. sub-model forward (autocast 境界) ---
+    # 【M3 phase review 採用】c_rescale で noise level conditioning 入力を scale
+    #   c_rescale=1.0 (default) / 1000.0 (T-M3.5 smoke ablation pathway)
+    #   ※ diffusion math (abar / x_t) は raw c を使用、conditioning 入力のみ scale
+    c_rescale = cfg.get("model", {}).get("noise_emb", {}).get("c_rescale", 1.0)
+    c_cond = c * c_rescale                                  # (B,) conditioning 用
     opt.zero_grad(set_to_none=True)
     with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp):
-        eps_pred = sub_model_k(mel, x_t, c)                # (B, T_audio)
+        eps_pred = sub_model_k(mel, x_t, c_cond)           # (B, T_audio)
 
     # --- 6. MSE loss (fp32 で計算、bf16 underflow 回避) ---
     with torch.autocast(device_type=device.type, enabled=False):
@@ -365,11 +387,19 @@ def _validation_forward(
     batch: dict,
     k: int,
     cfg: dict,
-) -> torch.Tensor:
-    """Validation 時の 1 step forward (MSE のみ計算、parameter 更新なし).
+) -> dict[str, torch.Tensor]:
+    """Validation 時の forward (MSE のみ計算、parameter 更新なし).
 
-    Train 時の sampling と異なり、validation では **band の中点** で
-    deterministic に c を固定する (品質 fluctuation 除外、§6 通常項目)。
+    【M3 phase review 採用昇格】単一点 (band 中点) ではなく、`c ∈ {L, mid, U}` の
+    3 点 fixed evaluation で MSE を計算する (band 境界での過適合検知のため)。
+    `run_validation` 側で 3 値を `sub_{k}/val/mse_at_{L,mid,U}` の 3 系列で TensorBoard へ。
+
+    Returns:
+        dict:
+          - `mse_at_L`   : c = L_k で固定した MSE
+          - `mse_at_mid` : c = (L_k + U_k) / 2 で固定した MSE (旧 単一点)
+          - `mse_at_U`   : c = U_k で固定した MSE
+          - `mse`        : 上記 3 点の平均 (best 判定用 / 旧 single point 互換)
     """
     sub_model_k = model.sub_models[k - 1]
     mel = batch["mel"]
@@ -377,14 +407,30 @@ def _validation_forward(
     B = x_gt.shape[0]
     device = x_gt.device
 
-    # validation は band 中点で deterministic
     L, U = model.BAND_BOUNDS[k - 1]
-    c_val = torch.full((B,), (L + U) / 2.0, device=device, dtype=x_gt.dtype)
-    abar = 1.0 - c_val ** 2
-    eps = torch.randn_like(x_gt)   # validation 用 seed は run_validation 側で固定
-    x_t = torch.sqrt(abar).unsqueeze(-1) * x_gt + c_val.unsqueeze(-1) * eps
-    eps_pred = sub_model_k(mel, x_t, c_val)
-    return F.mse_loss(eps_pred, eps)
+    c_values = {
+        "mse_at_L":   float(L),
+        "mse_at_mid": float((L + U) / 2.0),
+        "mse_at_U":   float(U),
+    }
+    c_rescale = cfg.get("model", {}).get("noise_emb", {}).get("c_rescale", 1.0)
+    results: dict[str, torch.Tensor] = {}
+    for tag, c_scalar in c_values.items():
+        c_val = torch.full((B,), c_scalar, device=device, dtype=torch.float32)
+        # bf16 dtype 罠回避 (train_diff_step §6.1 Critical と同じ)
+        with torch.autocast(device_type=device.type, enabled=False):
+            abar = 1.0 - c_val ** 2
+            sqrt_abar = torch.sqrt(abar)
+        eps = torch.randn_like(x_gt)  # validation 用 seed は run_validation 側で固定
+        x_t = (sqrt_abar.to(x_gt.dtype).unsqueeze(-1) * x_gt
+               + c_val.to(x_gt.dtype).unsqueeze(-1) * eps)
+        c_cond = (c_val * c_rescale).to(x_gt.dtype)  # conditioning 入力 (train と同じ scale)
+        eps_pred = sub_model_k(mel, x_t, c_cond)
+        results[tag] = F.mse_loss(eps_pred.float(), eps.float())
+
+    # best 判定用に 3 点平均を `mse` キーで提供
+    results["mse"] = (results["mse_at_L"] + results["mse_at_mid"] + results["mse_at_U"]) / 3.0
+    return results
 
 
 def build_loaders(cfg: dict, sub_model_k: int) -> tuple[DataLoader, DataLoader]:
@@ -392,7 +438,25 @@ def build_loaders(cfg: dict, sub_model_k: int) -> tuple[DataLoader, DataLoader]:
 
     Diff 側は segment_length=25600, hop_length=256 を config 経由で渡す。
     T-M2.1 §9.1 `seed_worker` を `worker_init_fn` に渡す。
+
+    【M3 phase review 採用 / Critical】 `--sub-model k` invocation 間で `spawn` worker
+    が seed を共有する罠を回避するため、sub-model 別 seed offset を base_seed に加算:
+        worker_seed = base_seed + sub_model_k * 1_000_000 + worker_id
+    これにより `--sub-model 1` と `--sub-model 2` が同じ worker_id でも別 seed となる
+    (persistent_workers=True + spawn context での 4 並列起動時の deterministic 確保)。
     """
+    base_seed = cfg["train"].get("seed", 0)
+    sub_model_offset = sub_model_k * 1_000_000
+
+    def _seed_worker_with_sub_model_offset(worker_id: int) -> None:
+        """`seed_worker` を sub-model 別 offset 付きで wrap (closure)."""
+        # T-M2.1 が提供する seed_worker のロジックに sub_model_offset を加算
+        torch_seed = (base_seed + sub_model_offset + worker_id) % (2 ** 32)
+        np.random.seed(torch_seed)
+        torch.manual_seed(torch_seed)
+        # T-M2.1 §9.1 が提供する `seed_worker` 内部 logic を呼ぶ場合は別途 import 検討
+        seed_worker(worker_id)  # T-M2.1 §9.1 の標準処理を最後に呼ぶ
+
     train_dataset = LibriTTSRDataset.from_config(cfg["data_train"], mode="train")
     val_dataset   = LibriTTSRDataset.from_config(cfg["data_val"],   mode="val", seed=42)
 
@@ -402,7 +466,7 @@ def build_loaders(cfg: dict, sub_model_k: int) -> tuple[DataLoader, DataLoader]:
         num_workers=cfg["train"]["num_workers"],   # 8
         shuffle=True,
         pin_memory=True,
-        worker_init_fn=seed_worker,                # T-M2.1 §9.1
+        worker_init_fn=_seed_worker_with_sub_model_offset,  # T-M2.1 §9.1 + sub-model offset
         prefetch_factor=cfg["train"].get("prefetch_factor", 2),
         persistent_workers=True,
         multiprocessing_context=cfg["train"].get("multiprocessing_context", "spawn"),
@@ -560,20 +624,26 @@ def log_scalars(writer: SummaryWriter, step: int, logs: dict,
 
 
 def run_validation(
-    model_fn: Callable[[dict], torch.Tensor],
+    model_fn: Callable[[dict], torch.Tensor | dict[str, torch.Tensor]],
     loader: DataLoader,
     metric_fn: Callable | None,
     device: torch.device,
     writer: SummaryWriter,
     step: int,
     tag_prefix: str = "val",
-) -> float:
+) -> float | dict[str, float]:
     """100 utterances で validation metric を計算し平均を返す.
 
-    model_fn(batch) は metric tensor (scalar) を返すクロージャ。
+    model_fn(batch) は scalar tensor または **dict[str, tensor]** を返すクロージャ。
     GAN/Diff 共用、内部で `torch.no_grad` + `model.eval()` 相当の管理は呼び出し側。
+
+    【M3 phase review 採用】 model_fn が dict を返す場合 (Diff の 3 点 evaluation):
+      - 各キー (`mse_at_L`, `mse_at_mid`, `mse_at_U`, `mse`) を utterance 平均し、
+        `{tag_prefix}/{key}` で TensorBoard 3+1 系列にログ
+      - 戻り値も dict[str, float] (呼び出し側は `["mse"]` で best 判定)
+    metric_fn は scalar tensor を返すレガシー path 用 (GAN)、dict path では None。
     """
-    ...  # 実装は T-M2.5 で行う
+    ...  # 実装は T-M2.5 で行う (dict 対応は本チケットで拡張)
 ```
 
 ### 2.3 使用するハイパーパラメータ / 定数
@@ -593,7 +663,10 @@ def run_validation(
 | scheduler | **不使用** (固定 lr) | docs/training.md §3.4 (FastDiff 慣例、InverseLR は GAN のみ) |
 | validation.interval_steps | 10000 | T-M2.5 と同期 |
 | validation.num_utterances | 100 | docs/training.md §6 |
-| validation.metric | MSE (deterministic c at band 中点) | 本チケットで決定 (§6.2) |
+| validation.metric | MSE (deterministic c at **3 点** L/mid/U) | 本チケットで決定 (§6.2、M3 phase review 採用昇格) |
+| validation.c_evaluation_points | `[L, mid, U]` (3 系列 TensorBoard ログ) | 本チケット §6.2 (M3 phase review 採用) |
+| `noise_emb.c_rescale` | 1.0 (default) / 1000.0 (ablation) | 本チケット §8.1 (M3 phase review 採用)、T-M1.5 §9.1 と連動 |
+| `train.seed` | 0 (worker_init_fn base seed) | 本チケット §6.1 Critical (M3 phase review 採用) |
 | checkpoint.interval_steps | 10000 | validation と同期 |
 | amp dtype | bf16 (`--amp`) / fp32 (default) | T-M1.5 §6.1 (fp16 sinusoidal underflow 回避) |
 | `BAND_BOUNDS[k-1]` | T-M3.1 で確定 | docs/architecture.md §5, docs/open-questions.md §B1 |
@@ -614,17 +687,17 @@ eps = torch.randn_like(x_gt)
 c = model.sample_noise_level(k, B)           # (B,) on CPU → device
 # k-th band [L_k, U_k] (T-M3.1) で uniform
 
-# 3. ᾱ_t, √ᾱ, √(1-ᾱ) を計算
-abar = 1.0 - c ** 2                           # (B,)
-sqrt_abar = torch.sqrt(abar)                  # (B,)
-sqrt_one_minus_abar = c                       # = √(1-ᾱ_t)
+# 3. ᾱ_t, √ᾱ, √(1-ᾱ) を計算 (fp32 強制、bf16 で c≈1.0 underflow 回避)
+abar = 1.0 - c.float() ** 2                   # (B,) fp32
+sqrt_abar = torch.sqrt(abar)                  # (B,) fp32
+sqrt_one_minus_abar = c.float()               # = √(1-ᾱ_t)
 
 # 4. DDPM 標準形 x_t を生成
 x_t = sqrt_abar.unsqueeze(-1) * x_gt \
     + sqrt_one_minus_abar.unsqueeze(-1) * eps  # (B, segment_length)
 
-# 5. sub-model forward
-eps_pred = model.sub_models[k-1](mel, x_t, c)  # (B, segment_length)
+# 5. sub-model forward (conditioning 入力に c_rescale を乗算)
+eps_pred = model.sub_models[k-1](mel, x_t, c * c_rescale)  # (B, segment_length)
 
 # 6. MSE loss
 loss = F.mse_loss(eps_pred, eps)
@@ -638,18 +711,19 @@ writer.add_scalar(f"sub_{k}/c_mean", c.mean().item(), step)
 writer.add_histogram(f"sub_{k}/noise_level_c", c, step)
 ```
 
-#### Validation (10k step ごと、deterministic c at band 中点)
+#### Validation (10k step ごと、deterministic c at 3 点 {L, mid, U}、M3 phase review 採用)
 
 1. `model.eval()` / `torch.no_grad()` で val_loader (100 utterances) を走査
-2. 各 utterance で:
-   - `c_val = (L_k + U_k) / 2.0` (band 中点固定、validation seed 固定)
+2. 各 utterance で、3 点 `c_val ∈ {L_k, (L_k+U_k)/2, U_k}` それぞれについて:
+   - `abar = 1 - c_val^2` (fp32 強制、bf16 dtype 罠回避)
    - `eps_val = torch.randn_like(audio)` (validation seed 固定で deterministic)
-   - `x_t_val = sqrt(1 - c_val^2) * audio + c_val * eps_val`
+   - `x_t_val = sqrt(abar) * audio + c_val * eps_val`
    - `eps_pred_val = sub_models[k-1](mel, x_t_val, c_val)`
-   - `mse = F.mse_loss(eps_pred_val, eps_val)`
-3. 100 utterance の MSE 平均で best 判定
-4. `best_val_metric` 更新時に `sub_{k}.pt` を atomic save
-5. 最初の 4 utterance で `add_audio(x_gt)`, `add_audio(x_t)`, `add_image(mel_visualization)`, `add_histogram(eps_pred)` を TensorBoard 出力
+   - `mse_at_{L,mid,U} = F.mse_loss(eps_pred_val, eps_val)`
+3. 100 utterance × 3 点の MSE を集計、`mse = (mse_at_L + mse_at_mid + mse_at_U) / 3.0` の平均で best 判定
+4. TensorBoard に `sub_{k}/val/mse_at_L`, `..._mid`, `..._U`, `..._mse` の 4 系列をログ
+5. `best_val_metric` 更新時に `sub_{k}.pt` を atomic save
+6. 最初の 4 utterance で `add_audio(x_gt)`, `add_audio(x_t)`, `add_image(mel_visualization)`, `add_histogram(eps_pred)` を TensorBoard 出力 (band 中点 `c_val` の x_t を代表として使用)
 
 #### Checkpoint state (resume 完全復元)
 
@@ -691,6 +765,11 @@ model:
     intermediate_dim: 1536
     n_blocks: 8
     conditioning_dim: 512
+  noise_emb:
+    # 【M3 phase review 採用昇格】c * c_rescale で noise level conditioning 入力を scale
+    # default 1.0 (論文 / FastDiff 慣例)、1000.0 は T-M3.5 smoke の ablation pathway 用
+    # T-M1.5 §9.1 `c * 1000` 案と連動 (sinusoidal embedding の有効レンジ調整)
+    c_rescale: 1.0
 
 data_train:
   filelist: data/filelists/train.tsv
@@ -721,6 +800,7 @@ train:
   prefetch_factor: 2
   multiprocessing_context: spawn
   grad_clip_norm: 1.0
+  seed: 0   # 【M3 phase review 採用 / Critical】worker_init_fn の base_seed
   optimizer:
     type: Adam
     lr: 2.0e-4
@@ -734,7 +814,8 @@ validation:
   interval_steps: 10000
   num_utterances: 100
   metric: mse
-  c_at_band_midpoint: true   # 本チケット §6.2 で決定
+  # 【M3 phase review 採用昇格】単一点 (c_at_band_midpoint) ではなく 3 点 (L, mid, U) 評価
+  c_evaluation_points: [L, mid, U]   # 旧: c_at_band_midpoint=true 単一
   num_audio_samples: 4
 
 checkpoint:
@@ -784,9 +865,12 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 ## 4. 提供範囲 (Scope)
 
 ### In Scope
-- `train_diff.py`: `main()` (click CLI、`--sub-model` 必須) + `train_diff_step` (1 step backward 公開関数) + `_validation_forward` + `build_loaders`
-- `tests/test_train_diff.py`: smoke step / 100 step loss / band sampling / 4 sub-model 独立 ckpt の各テスト
-- `configs/diff_wavenext2.yaml` への `model` / `data_train` / `data_val` / `train` / `validation` / `checkpoint` / `logging` セクション値確定
+- `train_diff.py`: `main()` (click CLI、`--sub-model` 必須) + `train_diff_step` (1 step backward 公開関数) + `_validation_forward` (3 点 evaluation) + `build_loaders` (sub-model 別 seed offset)
+- **【M3 phase review 採用】lazy instantiation 経由のモデル生成** (`from_config(only_sub_model=k)`)
+- **【M3 phase review 採用】bf16 c/abar fp32 強制境界 + worker seed sub-model offset + `c_rescale` 切替 + 3 点 validation**
+- `tests/test_train_diff.py`: smoke step / 100 step loss / band sampling / 4 sub-model 独立 ckpt + lazy instantiation / c_rescale / 3-point validation / bf16 c precision の各テスト
+- `configs/diff_wavenext2.yaml` への `model` (`noise_emb.c_rescale` 含む) / `data_train` / `data_val` / `train` (`seed` 含む) / `validation` (`c_evaluation_points` 含む) / `checkpoint` / `logging` セクション値確定
+- **`utils/training_loop.py` の `run_validation` を dict 戻り値対応に拡張** (3 点 evaluation 用)
 - docstring (英文 + 日本語混在、`docs/training.md` §3.4 を明示)
 - `pyproject.toml` の `[project.scripts]` 追加 (任意)
 
@@ -810,6 +894,8 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - **v-prediction parameterization** (eps-prediction 採用、§8.1 代替案)
 - **L1 loss (MAE) 代替** (MSE 採用、§8.1 代替案)
 - **Loss normalization (c で割る)** (§6.1 懸念事項、再評価トリガーは M5.2 / M6.2 発散時)
+- **【M3 phase review 検討追加・本チケットでは Out】`scripts/train_diff_all.py` multi-GPU Python orchestrator** (subprocess.Popen 4 並列、§8.1 検討追加。再評価トリガー M6.2 着手前、本チケットでは bash one-liner で十分)
+- **【M3 phase review 検討追加・本チケットでは Out】`Batch` TypedDict / `train_*_step` signature 統一 + `TrainStateGAN`/`TrainStateDiff` 分離** (§8.2、破壊的変更を避け M5.1 phase review で T-M2.5 と双方向決定)
 
 ### Deliverable
 - ファイル:
@@ -817,12 +903,12 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - `tests/test_train_diff.py` (新規実装)
   - `src/wavenext2/train/__init__.py` (re-export `main as main_diff`, `train_diff_step` 追加)
 - 編集:
-  - `src/wavenext2/utils/training_loop.py` (`TrainState` に `sub_model_k` field 追加、Diff 用 `best_val_metric` の generic 化)
-  - `configs/diff_wavenext2.yaml` (model / data / train / validation / checkpoint / logging セクション値確定)
+  - `src/wavenext2/utils/training_loop.py` (`TrainState` に `sub_model_k` field 追加、Diff 用 `best_val_metric` の generic 化 + `run_validation` を dict 戻り値対応に拡張)
+  - `configs/diff_wavenext2.yaml` (model (`noise_emb.c_rescale`) / data / train (`seed`) / validation (`c_evaluation_points`) / checkpoint / logging セクション値確定)
 - 関数 / クラス:
-  - `def main(config_path, sub_model_k, resume_path, debug, amp) -> None` (click CLI entry point)
-  - `def train_diff_step(model, opt, batch, k, cfg, amp, dtype) -> dict[str, float]` (公開関数、T-M3.5 / 将来 Lightning で再利用)
-  - 補助関数: `_validation_forward`, `build_loaders`
+  - `def main(config_path, sub_model_k, resume_path, debug, amp) -> None` (click CLI entry point、`from_config(only_sub_model=k)` で lazy instantiation)
+  - `def train_diff_step(model, opt, batch, k, cfg, amp, dtype) -> dict[str, float]` (公開関数、T-M3.5 / 将来 Lightning で再利用、bf16 c/abar fp32 強制 + c_rescale 適用)
+  - 補助関数: `_validation_forward` (3 点 dict 戻り値), `build_loaders` (sub-model 別 seed offset closure)
   - `TrainState.sub_model_k: int | None` field 追加
 - ドキュメント差分:
   - `docs/milestones.md` §M3.2 Acceptance チェックボックス更新
@@ -880,6 +966,7 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - [ ] `test_tensorboard_event_written`: 1 step 後に `logs/diff/sub_{k}/events.out.tfevents.*` が生成され、`sub_{k}/loss`, `sub_{k}/lr`, `sub_{k}/c_mean`, `sub_{k}/grad_norm` の scalar が存在
 - [ ] `test_tensorboard_histogram_noise_level`: 500 step 後に `sub_{k}/noise_level_c` histogram tag が存在 (Acceptance #2)
 - [ ] `test_validation_audio_logged`: validation 実行後に `sub_{k}/val/audio_*`, `sub_{k}/val/mel_*` tag が存在
+- [ ] **【M3 phase review 採用】`test_validation_3point_tensorboard`**: validation 実行後に `sub_{k}/val/mse_at_L`, `sub_{k}/val/mse_at_mid`, `sub_{k}/val/mse_at_U`, `sub_{k}/val/mse` の 4 scalar 系列が存在
 
 #### CLI / config
 - [ ] `test_cli_sub_model_required`: `--sub-model` 引数なしで起動 → click が `Missing option` で fail
@@ -892,9 +979,16 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - [ ] `test_seed_determinism`: 同 seed + 同 config + 同 batch で 1 step 後の `sub_models[k-1].state_dict()` が deterministic
 - [ ] `test_seed_worker_imported_from_dataset`: `from wavenext2.data.dataset import seed_worker` で import 可能 (T-M2.1 §9.1 から流用)
 - [ ] `test_worker_init_fn_isolates_rng`: DataLoader を 2 worker で起動して、各 worker の `np.random.rand()` が異なることを確認 (T-M2.1 §6.1 通常項目 worker seed 分散)
+- [ ] **【M3 phase review 採用 / Critical】`test_worker_init_fn_sub_model_offset`**: `--sub-model 1` と `--sub-model 2` で同 worker_id でも別 seed (`seed_2 - seed_1 == 1_000_000`)、`spawn` context での `persistent_workers=True` 罠を回避 (§6.1 Critical)
 
 #### SIGTERM / preemption
 - [ ] `test_sigterm_emergency_save`: `os.kill(os.getpid(), SIGTERM)` を別スレッドから送信し、`emergency_step_N_sub_{k}.pt` が生成されることを確認
+
+#### 【M3 phase review 採用昇格】新規テスト群
+- [ ] **`test_lazy_instantiation_memory_saved`**: `DiffWaveNext2.from_config(cfg, only_sub_model=1)` で 1 sub-model のみ instantiate、`torch.cuda.max_memory_allocated()` が 4 sub-model 版の **約 1/4** (sub_models[1..3] が None placeholder)
+- [ ] **`test_c_rescale_switch`**: `cfg["model"]["noise_emb"]["c_rescale"] = 1000.0` で `eps_pred` 出力が `c_rescale=1.0` 時と **異なる** ことを assert (smoke ablation pathway の有効性確認、T-M3.5 ablation 連動)
+- [ ] **`test_validation_3point`**: `_validation_forward` が `mse_at_L`, `mse_at_mid`, `mse_at_U`, `mse` の 4 キーを持つ dict を返す。`mse = (mse_at_L + mse_at_mid + mse_at_U) / 3.0` の一致確認。TensorBoard に 3 系列 (`sub_{k}/val/mse_at_{L,mid,U}`) が記録されることも確認
+- [ ] **`test_bf16_c_precision`**: `--amp` 時に `c = 0.99995` (sub-model 1 の schedule 点に近い値) を input にして、`abar = 1.0 - c**2` が **underflow しない** (`abar > 1e-5`) ことを assert。`train_diff_step` 内の `with autocast(enabled=False)` 境界の有効性検証 (§6.1 Critical 「bf16 と c の数値精度」)
 
 ### 5.2 e2e / 結合テスト
 - [ ] `test_real_audio` (T-M0.3 完了後、`@pytest.mark.slow` で skip 可): LibriTTS-R 1 utterance で sub-model 1 を 5 step 実行、loss が `isfinite`、`x_t` が `[-segment_length^0.5, segment_length^0.5]` の数値範囲
@@ -916,9 +1010,11 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 
 - **GPU テスト分離**: `@pytest.mark.gpu` で GPU 必須テストを CI runner 別に分離。`test_amp_bf16` は GPU マーカー必須
 - **`@pytest.mark.slow` マーカー**: `test_real_audio` 等 LibriTTS-R 実音声を使うテストは slow でデフォルト除外
-- **CI 時間目標**: `tests/test_train_diff.py` 全体 **40 秒以内** (`test_train_diff_step_loss_decreasing_100step` が 100 step × forward+backward で支配的、batch_size=1, T_audio=4096 で最小化)
+- **CI 時間目標**: **T-M3.2 単独 60 秒以内** (`test_train_diff_step_loss_decreasing_100step` が 100 step × forward+backward で支配的、batch_size=1, T_audio=4096 で最小化)
   - **必須最適化**: `scope="module"` fixture で `model`, `opt`, `batch` を再利用
   - **batch_size=1, segment_length=4096 で最小化**: smoke では segment_length=25600 の 1/6 でメモリ・時間削減
+  - **【M3 phase review 採用】`pytest -n 4` 推奨** (sub-model k=1..4 同時並列、CI runner で `pytest-xdist` 経由): 4 sub-model 独立テスト (`test_independent_checkpoint_per_sub_model`, `test_only_target_sub_model_updates` 等) を物理並列で 4× 短縮 (60s → 15s)
+  - **GPU テスト** (`@pytest.mark.gpu`) は CPU テストとは別 job (CI matrix)
 - **fixture 共用 (T-M2.5 と連携)**: `tests/conftest.py` の `gan_smoke_batch` を流用、`diff_smoke_batch` で segment_length=4096 版を追加。`model` fixture は GAN/Diff で別 (型が違うため)
 - **coverage 目標**: 本チケットのカバレッジ目標 **80%** (Resume の異常系 / config drift warning は手動テスト)
 
@@ -942,11 +1038,25 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - **緩和案** (§8.1): `loss = F.mse_loss(eps_pred, eps) / (c ** 2 + ε)` の scale 補正、または v-prediction parameterization
   - **検知**: TensorBoard で sub_model 1〜4 の loss curve を並べて、sub-model 4 だけが極端に flat なら警告
 
-- **CRITICAL: `DiffWaveNext2` 全体 instantiate で OOM** (T-M3.1 §9.1 で要請):
+- **CRITICAL: `DiffWaveNext2` 全体 instantiate で OOM** (M3 phase review 採用昇格で解決):
   - 4 sub-model × 14.42M = 57.68M params + activation 4 倍 で 24GB GPU でも OOM 可能性
-  - **緩和**: T-M3.1 に `from_config(cfg, only_sub_model: int | None = None)` の追加を要請 (§9.1)
-  - **当面の workaround**: 全 4 sub-model instantiate するが、3 個は `.eval()` + `requires_grad_(False)` で activation も保持しない設計 (但し forward を呼ばないため activation は実質生成されない)
-  - **検知**: `test_train_diff_step_smoke` で `torch.cuda.max_memory_allocated()` を pin (例: T_audio=4096 batch=1 fp32 で < 4GB)
+  - **【M3 phase review 採用昇格】解決**: T-M3.1 の `from_config(cfg, only_sub_model=k)` を **v1 で必須採用** (本チケット §1 ゴール / §2.2 コード) → 1×14.42M に削減、メモリ 1/4、init 時間 1/4、4 並列 CLI 起動時の `torch.cuda.empty_cache()` ハック不要
+  - **検知**: `test_lazy_instantiation_memory_saved` で 4 sub-model 版に対する 1/4 メモリ消費を assert (`torch.cuda.max_memory_allocated()`)
+
+- **【M3 phase review 採用 / CRITICAL】bf16 と `c` の数値精度**:
+  - sub-model 1 の noise level `c ≈ 0.99995` は bf16 (mantissa 8 bit) で **`1.0` に丸まる** 可能性
+  - 結果: `abar = 1.0 - c**2 = 0.0` → `√abar = 0` → `x_t = 0 * x_gt + 1.0 * eps = eps` で **x_gt 成分が完全消失** (= 純粋ノイズ予測になり訓練破綻)
+  - **対応**: `train_diff_step` 内で `c` と `abar` の計算を `with torch.autocast(enabled=False)` の **fp32 強制境界** で囲む (§2.2 コード参照)
+  - `c_fp32 = c.float()` で明示的に fp32 にし、broadcast 時に `x_gt.dtype` へ cast し直す
+  - **検知**: `test_bf16_c_precision` で `c = 0.99995` 入力で `abar > 1e-5` を assert
+  - **影響範囲**: train / validation 両方 (validation も `c = L_k` で sub-model 1 の場合 `0.9929` から同様の問題)
+
+- **【M3 phase review 採用 / CRITICAL】`worker_init_fn` × `persistent_workers` × `--sub-model k` invocation 間の seed 共有罠**:
+  - `spawn` context で `persistent_workers=True` の場合、`--sub-model 1` と `--sub-model 2` を同 base seed で起動すると worker_id 0 が同 seed を引く → 同じ random crop offset で訓練データが完全重複
+  - **対応**: `seed = base_seed + sub_model_k * 1_000_000 + worker_id` (`build_loaders` 内の `_seed_worker_with_sub_model_offset` closure、§2.2 コード参照)
+  - 1_000_000 offset で 4 sub-model 間の seed 重複確率を実質ゼロ化 (worker_id は 0..7、sub_model は 1..4)
+  - **検知**: `test_worker_init_fn_sub_model_offset` で `seed_for_k=1 ≠ seed_for_k=2` を assert
+  - **影響範囲**: 4 並列 CLI 起動時のデータ多様性 (本格訓練 M6.2 で 4 sub-model が同じ utterance subset を学習する罠)
 
 #### 通常項目
 
@@ -965,11 +1075,11 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - **対応**: `train_diff_step` は `eps_pred = sub_model_k(mel, x_t, c)` で呼ぶ、T-M3.1 と signature 合致を tests/test_sub_model.py で確認済前提
   - **検証**: `test_eps_pred_shape` で shape `(B, segment_length)` を確認
 
-- **Validation の `c` 固定値の妥当性**:
-  - 本チケットは validation で band 中点 `c_val = (L_k + U_k) / 2.0` を使用
-  - **代替案**: band 内ランダム + validation seed 固定でも deterministic 化可能 (実装は単純)
-  - **採用根拠**: band 中点は schedule 点と離れている可能性があるが、訓練分布の中心なので representative
-  - **再評価**: M5.2 smoke で validation MSE と推論時の品質の相関が薄ければ band 中点ではなく **schedule 点固定** (`c_val = SCHEDULE_C[k-1]`) に変更
+- **Validation の `c` 固定値の妥当性** (M3 phase review で 3 点化):
+  - 本チケットは validation で **3 点 `c ∈ {L_k, (L_k+U_k)/2, U_k}`** を使用 (旧: band 中点単一)
+  - **3 点採用根拠**: band 中点単一だと band 境界 (`c = L_k`, `c = U_k`) での過適合・劣化を検知できない。3 点 (`min/mean/max`) を見ることで band 全域の汎化を監視
+  - **代替案**: band 内ランダム + validation seed 固定でも deterministic 化可能 (実装は単純) だが、3 点固定のほうが TensorBoard 系列が安定し step 間比較が容易
+  - **再評価**: M5.2 smoke で 3 点間の MSE 乖離が大きい / 推論品質との相関が薄ければ **schedule 点固定** (`c_val = SCHEDULE_C[k-1]`) に変更
 
 - **`iter_forever` + `persistent_workers=True` の seed 罠 (T-M2.1 §6.1 から伝搬)**:
   - DataLoader が worker 再起動なしに新 epoch に入ると random crop seed が更新されず **同じ crop が繰り返される** 可能性
@@ -1018,7 +1128,7 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - EMA 不使用 → 確定
 
 - 本チケットで決定する事項:
-  - **Validation 時の `c` 値**: **band 中点** (`(L_k + U_k) / 2`) を採用。schedule 点固定との trade-off は §6.1 で決定 (band 中点は train 分布の中心、schedule 点は推論時の実値)。**再評価トリガー: M5.2 smoke**
+  - **Validation 時の `c` 値** (M3 phase review で更新): **3 点 fixed evaluation `c ∈ {L_k, (L_k+U_k)/2, U_k}`** を採用 (旧: band 中点単一)。band 境界での過適合検知のため、`mse_at_L / mse_at_mid / mse_at_U` の 3 系列を TensorBoard へ、best 判定は 3 点平均。schedule 点固定への切替は **再評価トリガー: M5.2 smoke で band 境界 MSE が中点と乖離した場合**
   - **Loss normalization (`c` で割る) は採用しない**: FastDiff 慣例。**再評価トリガー: M5.2 / M6.2 で sub-model 4 が学習しない場合**
   - **`sub_model_k` を CLI 必須引数化**: config の `train.sub_model_k` ではなく CLI 必須にすることで、4 sub-model を **並列起動 (multi-GPU) 可能** な設計を担保 (T-M6.2 用)
   - **Checkpoint ファイル名規約**: best = `sub_{k}.pt`、interval = `step_{step}_sub_{k}.pt`、emergency = `emergency_step_{step}_sub_{k}.pt`、すべて sub-model index を suffix に含む
@@ -1090,6 +1200,11 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - [ ] `--sub-model` 必須化で 4 sub-model 並列起動が可能 (multi-GPU で `CUDA_VISIBLE_DEVICES` 分離可能)
 - [ ] `pyproject.toml` の `[project.scripts]` 追加 (任意、追加した場合は `uv run train-diff --help` が動作)
 - [ ] **`sample_noise_level` 戻り値 device / dtype** が tests で pin されている (T-M3.1 §9.1 申し送り事項の確認)
+- [ ] **【M3 phase review】lazy instantiation**: `from_config(only_sub_model=k)` で 1 sub-model のみ instantiate、`test_lazy_instantiation_memory_saved` で 1/4 メモリ確認
+- [ ] **【M3 phase review】bf16 と c の数値精度**: `--amp` 時に `c` / `abar` 計算が fp32 強制境界 (`with autocast(enabled=False)`) で囲まれ、`c=0.99995` で `abar` が underflow しない (`test_bf16_c_precision`)
+- [ ] **【M3 phase review】worker seed 分離**: `seed = base_seed + sub_model_k * 1_000_000 + worker_id` で `--sub-model 1/2` の同 worker_id が別 seed (`test_worker_init_fn_sub_model_offset`)
+- [ ] **【M3 phase review】validation 3 点 evaluation**: `c ∈ {L, mid, U}` の 3 系列 + 平均 `mse` が TensorBoard に記録 (`test_validation_3point`, `test_validation_3point_tensorboard`)
+- [ ] **【M3 phase review】`c_rescale` 切替**: `cfg["model"]["noise_emb"]["c_rescale"] ∈ {1.0, 1000.0}` で eps_pred が変化 (`test_c_rescale_switch`)
 
 ## 8. ゼロから作り直すとしたら
 
@@ -1098,6 +1213,25 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 ### 8.1 別の設計を採るとしたら
 
 #### 採用設計
+
+- **【M3 phase review 採用昇格】lazy instantiation (`from_config(only_sub_model=k)`) を v1 必須採用**:
+  - 4×14.42M instantiate を **1×14.42M に削減**、メモリ消費・モデル init 時間ともに 1/4 短縮
+  - 4 並列 CLI 起動 (multi-GPU) 時の `torch.cuda.empty_cache()` ハック不要
+  - T-M3.1 と同期 (T-M3.1 §9.1 `only_sub_model` 採用要請が既に存在、本チケット採用昇格でデフォルト動作化)
+  - **検証**: `test_lazy_instantiation_memory_saved` で 1/4 メモリ確認
+  - 旧設計 (全 4 sub-model instantiate + 3 個 `requires_grad_(False)`) は **却下**: メモリ節約効果がなく、init 時間も × 4
+
+- **【M3 phase review 採用昇格】validation 3 点 fixed evaluation (`c ∈ {L, mid, U}`)**:
+  - 現状 `c_val = (L + U) / 2` 単点だと **band 中点での過適合検知に弱い** (band 境界の品質劣化を見落とす)
+  - 採用: `min/mean/max` MSE を TensorBoard 3 系列 (`sub_{k}/val/mse_at_L`, `..._mid`, `..._U`) でログ
+  - best 判定は 3 点平均 `(mse_at_L + mse_at_mid + mse_at_U) / 3.0` を `mse` キーとして使用 (旧 single point 互換)
+  - **検証**: `test_validation_3point` で 4 キー dict と 3 点平均一致
+
+- **【M3 phase review 採用昇格】`c_rescale` 切替可能化** (`cfg["model"]["noise_emb"]["c_rescale"] ∈ {1.0, 1000.0}`):
+  - T-M1.5 §9.1 の `c * 1000` 案を YAML config 経由で ablation 可能化
+  - T-M3.5 smoke の ablation pathway を本チケットで用意 (model 側変更を T-M1.5 で行わず train 側で切替)
+  - default: `1.0` (論文 / FastDiff 慣例)、`1000.0` は smoke 比較用
+  - **検証**: `test_c_rescale_switch` で 2 値間で `eps_pred` が異なることを assert
 
 - **素 PyTorch + click CLI で 1 ファイル (`train_diff.py`) に集約** (T-M2.5 §8.1 と同じ理由):
   - (a) `accelerate` / `pytorch-lightning` は抽象レイヤが厚すぎ、4 sub-model 独立訓練のような非標準パターンで hook が増えて可読性低下
@@ -1132,9 +1266,10 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - MSE loss も `(eps_pred - eps)^2 ≈ 1e-3` で fp16 underflow リスク
   - 検証: `test_amp_autocast_boundary` で MSE が fp32 で計算されることを assert
 
-- **【採用】Validation で band 中点 `c_val = (L_k + U_k) / 2.0` 固定**:
-  - 訓練分布の中心、representative
-  - 代替案 (schedule 点固定) は推論時実値だが分布の端、validation の安定性低下
+- **【M3 phase review で昇格】Validation で 3 点 fixed evaluation (`c ∈ {L, mid, U}`)** (旧: band 中点単一):
+  - 訓練分布の境界 + 中心 を全て pin、band 境界の過適合検知強化
+  - best 判定は 3 点平均、TensorBoard では 3 系列に分離
+  - 代替案 (schedule 点固定) は M5.2 で再評価トリガー
 
 - **【採用】TensorBoard log directory を sub-model 別に分離** (`logs/diff/sub_{k}/`):
   - multi-GPU 並列起動時の collision 防止
@@ -1197,6 +1332,16 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - **【検討追加】pydantic / dataclass-based config schema** (T-M2.5 §8.1 と同期):
   - 採用しない (現時点)、**再評価トリガー: M5.1 phase review で config 変更頻発時**
 
+- **【M3 phase review 検討追加】multi-GPU Python orchestrator `scripts/train_diff_all.py`**:
+  - 内容: `subprocess.Popen` で 4 並列起動 + `wait`、各子プロセスに `CUDA_VISIBLE_DEVICES=0..3` を環境変数で渡す
+  - 採用メリット (vs bash one-liner):
+    - **SIGTERM 伝播**: 親プロセスが SIGTERM を受信したら 4 子プロセス全部に propagate、現状 bash `&` + `wait` は SIGTERM が子に伝わらない罠
+    - **stdout 混線回避**: 各子の stdout を別 file (`logs/diff/sub_{k}/stdout.log`) にリダイレクト
+    - **1 sub-model fail 時の rollback**: 1 つの sub-model が異常終了したら他 3 つも安全に停止 + emergency ckpt を全 sub-model で保存
+    - **preempt 復旧**: M6.2 で 32h 訓練中の cluster preemption 発生時、Python 側で `--resume checkpoints/diff/sub_{k}.pt` を 4 つ生成
+  - 採用しない (現時点、本チケットでは bash one-liner で十分)
+  - **再評価トリガー: M6.2 着手前** (cluster preemption 頻度・SIGTERM 動作確認結果で判断)、本チケットの §9.1 で T-M6.2 へ申し送り済
+
 #### 再評価トリガー条件
 | 設計判断 | 再評価タイミング | 想定変更 |
 |---|---|---|
@@ -1207,11 +1352,15 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 | eps-prediction (vs v-prediction / x_0 prediction) | M5.2 で sub-model 4 学習しない / M6.2 品質劣化 | v-prediction parameterization 採用 |
 | Loss normalization なし (vs `MSE/(c^2+ε)`) | M5.2 で sub-model 4 学習しない | normalization 採用 |
 | Uniform sampling (vs log-uniform) | M5.2 で sub-model 1 (c ≈ 1.0) 高 loss | log-uniform 採用 |
-| Validation `c` at band 中点 | M5.2 で validation MSE と推論品質の相関が薄い | schedule 点固定に変更 |
+| Validation `c` at 3 点 {L, mid, U} | M5.2 で 3 点 MSE が乖離 / 推論品質と相関薄い | schedule 点固定に変更 |
 | `max_steps=1M` 一律 | M6.2 で sub-model 別 plateau 時刻が大幅に異なる | sub-model 別 max_steps |
 | Single sub-model per CLI invocation | M6.2 wall-clock 短縮が必要 | multi-sub-model parallel in single CLI (multi-GPU) |
 | `histogram_interval_steps=500` | logs disk 容量超過 | 10000 に間引き |
 | pydantic config schema | M5.1 phase review (T-M2.5 と同期) | 採用判断 |
+| bash one-liner 4 並列 (vs Python orchestrator) | M6.2 着手前 (preempt / SIGTERM 動作確認) | `scripts/train_diff_all.py` (subprocess.Popen) 採用 |
+| Validation 3 点 (L/mid/U) vs schedule 点固定 | M5.2 で band 境界 MSE が中点と乖離 | schedule 点固定に変更 |
+| `c_rescale=1.0` (default) | T-M3.5 smoke ablation で `1000.0` が優位 | `c_rescale=1000.0` に切替 |
+| Lazy instantiation (`only_sub_model=k`) | (採用済、再評価なし) | — |
 
 ### 8.2 思想 / 哲学の見直し
 
@@ -1235,6 +1384,39 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - 1 sub-model = 1 訓練プロセス = 1 checkpoint = 1 TensorBoard directory
   - 設計の単純さ最優先、resume / preemption / multi-GPU 並列のすべてで利点
   - 代替案 (single CLI で 4 sub-model 順次 / 並列) は state 管理複雑化のため却下
+
+- **【M3 phase review 検討追加】`Batch` TypedDict による `train_*_step` signature 統一**:
+  - 現状: GAN は `train_gan_step(G, D, opt_G, opt_D, sch_G, sch_D, mel, audio, cfg)` で 9 引数、Diff は `train_diff_step(model, opt, batch, k, cfg)` で 5 引数 → **不揃い**
+  - 提案統一形: `train_*_step(models: dict, opts: dict, batch: Batch, cfg: dict) -> dict[str, float]`
+    - GAN: `models = {"G": G, "D": D}`, `opts = {"G": opt_G, "D": opt_D}`, `cfg["schedulers"]` で scheduler 管理
+    - Diff: `models = {"sub": sub_model_k}`, `opts = {"sub": opt}`, `cfg["k"]` で sub-model index
+  - メリット: fixture 完全共用、Lightning 移行で `LightningModule.training_step` 直接移植可能
+  - **採用しない (現時点)**: T-M3.2 単独で破壊的変更すると T-M2.5 を retrofit する必要 → **T-M2.5 の §9.1「T-M3.2 への申し送り」に記載 → 本チケットから T-M2.5 へ逆方向の申し送り (§9.1)**
+  - **再評価トリガー**: M5.1 phase review (Lightning 移行検討と同期)
+
+- **【M3 phase review 検討追加】`TrainStateGAN` / `TrainStateDiff` 分離 + `BaseTrainState` 親クラス**:
+  - 現状: `TrainState.sub_model_k: int | None` で GAN/Diff 両方の field を保持 (Diff 専用 + GAN 専用 `d_loss_below_threshold_steps` が共存) → **God dataclass、SRP 違反**
+  - 提案:
+    ```python
+    @dataclass
+    class BaseTrainState:
+        step: int = 0
+        best_val_metric: float = float("inf")
+        rng_state: dict | None = None
+
+    @dataclass
+    class TrainStateGAN(BaseTrainState):
+        d_loss_below_threshold_steps: int = 0
+        _d_loss_history: list[float] = field(default_factory=list)
+
+    @dataclass
+    class TrainStateDiff(BaseTrainState):
+        sub_model_k: int = 1
+    ```
+  - メリット: 各 State の field が明確、`utils/training_loop.py` の `save_checkpoint` は `BaseTrainState` で受ければ済む
+  - **採用しない (現時点)**: T-M2.5 で既に統合 `TrainState` 実装済 → 破壊的変更を避ける
+  - **T-M2.5 の §9.1 にも申し送り済** (本チケット §9.1 で再確認、T-M2.5 への逆方向の申し送り)
+  - **再評価トリガー**: M5.1 phase review
 
 #### M1 / M2 phase review で確立した原則の適用
 
@@ -1274,6 +1456,9 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - 本チケットで実装した `--debug` フラグは 1 step だけのため T-M3.5 では使わない
   - smoke 完了後に `sub_1.pt` 1 ファイルのみ生成 (10k step に達しないため interval ckpt は生成されない)
   - 同じ utterance に対する reverse sample が GT に近い (MR-STFT loss で比較) は T-M3.3 (reverse sampler) 完了後に実施
+- **【M3 phase review 採用】T-M3.5 への追加事項**:
+  - **`c_rescale` config で `1.0` / `1000.0` 切替で ablation pathway を活用**: T-M3.5 内で 2 値の loss curve を比較し、どちらが smoke で速く収束するかを記録 (T-M1.5 申し送りと連動)
+  - **3-point validation の `init_loss` baseline pin**: smoke 開始直後 (step=0) の validation で `mse_at_L`, `mse_at_mid`, `mse_at_U` の 3 値を取得し baseline として固定。1000 step 後に 3 値すべてが初期値の 5% 以下になることを確認 (band 境界での過適合検知の前向き検証)
 
 #### T-M5.2 (1 sub-model 1 epoch 訓練) へ
 - **使用方法**:
@@ -1315,6 +1500,11 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - `checkpoint.keep_last_n=5` で rolling delete を有効化、`sub_{k}.pt` (best) のみ常時保持
   - 訓練完了後に T-M3.4 post-filter fit (`scripts/fit_post_filter.py`) を自動実行
   - 推論パイプライン (T-M3.3) と組み合わせて test-clean-100 全 4824 utterance を評価
+- **【M3 phase review 検討追加】`scripts/train_diff_all.py` orchestrator を T-M6.2 で実装検討**:
+  - bash one-liner (`& ... wait`) は **SIGTERM 伝播・stdout 混線・1 sub-model fail 時の rollback が脆い**
+  - Python orchestrator (`subprocess.Popen` 4 並列 + `wait`、`CUDA_VISIBLE_DEVICES=0..3`) のほうが **M6.2 32h preempt 復旧時に有利** (本チケット §8.1 検討追加に詳細)
+  - **再評価トリガー: M6.2 着手前** (cluster の SIGTERM 挙動・preempt 頻度を確認して bash vs Python を決定)
+  - lazy instantiation (`only_sub_model=k`) と組み合わせれば 4 並列でもメモリは 4×14.42M で済む (採用昇格)
 
 #### T-M3.3 (Reverse sampler) へ
 - **使用方法**:
@@ -1339,6 +1529,16 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - **`train_gan_step` 同 signature**: `train_diff_step(model, opt, batch, k, cfg)` で並列構造
 - **AMP autocast 境界**: GAN 同様、forward は autocast / loss 計算は fp32 (`with torch.autocast(..., enabled=False)`)
 
+#### T-M2.5 (train_gan) への申し送り (M3 phase review、逆方向)
+- **【再確認】`Batch` TypedDict / `train_*_step` signature 統一**:
+  - 現状 GAN は 9 引数、Diff は 5 引数で不揃い → 統一形 `train_*_step(models: dict, opts: dict, batch: Batch, cfg) -> dict[str, float]` を提案
+  - 本チケット §8.2 に詳細。Lightning 移行 (M5.1) の前提として T-M2.5 / T-M3.2 双方を retrofit
+  - **採用判断: M5.1 phase review** (現時点は破壊的変更を避け各 signature 維持)
+- **【再確認】`TrainStateGAN` / `TrainStateDiff` 分離 + `BaseTrainState` 親クラス**:
+  - 現状 `TrainState` が GAN 専用 `d_loss_below_threshold_steps` + Diff 専用 `sub_model_k` を両持ち → God dataclass、SRP 違反
+  - 本チケット §8.2 に提案コード。`save_checkpoint` は `BaseTrainState` で受ける設計に
+  - **採用判断: M5.1 phase review** (T-M2.5 §9.1「T-M3.2 への申し送り」と双方向で確認)
+
 #### T-M2.1 (Dataset) から受領
 - **`Batch` TypedDict**: `from wavenext2.data.dataset import Batch` で `{"mel", "audio", "n_samples"}` キーを共有
 - **`seed_worker` 関数**: `from wavenext2.data.dataset import seed_worker` で `worker_init_fn` 用 (T-M2.1 §9.1 で提供)
@@ -1347,19 +1547,24 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - **`multiprocessing_context="spawn"`**: Windows / Linux 共通で明示
 
 #### T-M3.1 (DiffWaveNext2) から受領
-- **`DiffWaveNext2.from_config(cfg["model"])`**: 4 sub-model instantiate
+- **【M3 phase review 採用昇格】`DiffWaveNext2.from_config(cfg["model"], only_sub_model=k)`**:
+  - **v1 で必須**: 4 sub-model のうち k 番目のみ instantiate (メモリ 1/4)
+  - `__init__` で `only_sub_model` を受け、`sub_models[k-1]` だけ実体化、他は `None` placeholder
+  - Optimizer には `sub_models[k-1].parameters()` のみ渡す (本チケット §2.2)
 - **`model.sample_noise_level(k, B) -> torch.Tensor (B,) float32`**: band 内 uniform sampling
 - **`model.BAND_BOUNDS[k-1] -> (L, U)`**: band 境界
-- **`model.sub_models: nn.ModuleList[SubModelDiff]`** (1-indexed → 0-indexed)
+- **`model.sub_models: nn.ModuleList[SubModelDiff | None]`** (1-indexed → 0-indexed、`only_sub_model=k` 時は `[None, ..., SubModelDiff, ..., None]`)
 - **`SubModelDiff.forward(mel, x_t, c) -> eps_pred (B, T_audio)`** (T-M1.6 で確定)
 
 #### T-M3.1 への申し送り (本チケット §6.1 critical)
 - **`sample_noise_level(k, B, device=None, generator=None) -> torch.Tensor (B,) float32`** の signature 採用要請:
   - `device` 指定でデバイス転送コスト削減
   - `generator` 指定でグローバル RNG 汚染回避 (`worker_init_fn` の効果を保つ)
-- **`from_config(cfg, only_sub_model: int | None = None)` の追加要請**:
+- **【M3 phase review 採用昇格】`from_config(cfg, only_sub_model: int | None = None)` の追加要請 (v1 必須)**:
   - 1 sub-model のみ instantiate するメモリ節約モード
-  - 本チケットでは default (`only_sub_model=None`) で全 4 sub-model instantiate するが、メモリ逼迫時は `only_sub_model=k` で `--sub-model k` 専用ロード
+  - **本チケットは `only_sub_model=k` を v1 でデフォルト使用** (採用昇格): メモリ 1/4、init 時間 1/4、4 並列 CLI 起動時の `torch.cuda.empty_cache()` ハック不要
+  - `only_sub_model=k` 時は `sub_models[k-1]` のみ実体化、他は `None` placeholder で返す
+  - **T-M3.1 から本チケットへの受領動作**: `__init__` で `only_sub_model` を受け、`sub_models[k-1]` のみ optimizer に渡される設計に整合
 - **`BAND_BOUNDS` の閉区間 / 半開区間仕様**:
   - 本チケットは `torch.empty(B).uniform_(L, U)` (半開区間 `[L, U)`) を採用
   - sub-model 1 で `c = 1.0` が出ないため、推論時の `c = 0.99995` (schedule 点) が範囲内であることを T-M3.1 で確認
@@ -1392,9 +1597,12 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - eps-prediction → v-prediction / x_0 prediction (M5.2 で sub-model 4 学習しない場合)
   - Loss normalization (`MSE / (c^2 + ε)`) 採用 (M5.2 で sub-model 4 学習しない場合)
   - Uniform → log-uniform sampling (M5.2 で sub-model 1 高 loss)
-  - Validation `c` を band 中点 → schedule 点固定 (M5.2 で相関薄い)
+  - Validation `c` を 3 点 {L, mid, U} → schedule 点固定 (M5.2 で 3 点乖離 / 相関薄い)
   - `max_steps` を sub-model 別 (M6.2 で plateau 時刻が大幅に異なる)
   - Single CLI で multi-sub-model parallel (M6.2 wall-clock 短縮)
+  - `c_rescale` を 1.0 → 1000.0 (T-M3.5 smoke ablation で 1000 優位なら)
+  - `scripts/train_diff_all.py` Python orchestrator 採用 (M6.2 着手前、preempt / SIGTERM 動作確認)
+  - `Batch` TypedDict / signature 統一 + `TrainStateGAN`/`TrainStateDiff` 分離 (M5.1 phase review、Lightning 移行と同期)
   - wandb 採用 (M5.1 phase review、T-M2.5 §8.1 と同期)
   - `accelerate` 採用 (M6.2 multi-GPU 化時)
 - **`docs/open-questions.md` への追記要否**: 不要

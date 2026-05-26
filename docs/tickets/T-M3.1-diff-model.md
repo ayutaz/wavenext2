@@ -217,14 +217,31 @@ class DiffWaveNext2(nn.Module):
         )
 
     @classmethod
-    def from_config(cls, cfg: dict) -> "DiffWaveNext2":
+    def from_config(cls, cfg: dict, only_sub_model: int | None = None) -> "DiffWaveNext2":
         """YAML config から DiffWaveNext2 を生成 (T-M1.6 §8.2 factory パターン一貫化).
 
         Args:
             cfg: dict with key "sub_model_cfg" (and optional future fields).
+            only_sub_model: 指定時は対象 sub-model (1-indexed) のみを instantiate し、
+                他は None placeholder で `sub_models` に格納する (state_dict 互換維持)。
+                T-M3.2 で 1 sub-model のみ訓練するときの OOM 回避 (4×14.42M=~58M weight +
+                optimizer state を削減) 用。default=None で全 4 sub-model を instantiate。
         """
         sub_model_cfg = cfg.get("sub_model_cfg", {})
-        return cls(sub_model_cfg=sub_model_cfg)
+        if only_sub_model is None:
+            return cls(sub_model_cfg=sub_model_cfg)
+        # lazy instantiation: 指定 sub-model 1 個のみ Module、他は None
+        if not 1 <= only_sub_model <= cls.K:
+            raise ValueError(f"only_sub_model must be in [1, {cls.K}], got {only_sub_model}")
+        instance = cls(sub_model_cfg=sub_model_cfg)
+        for i in range(cls.K):
+            if (i + 1) != only_sub_model:
+                instance.sub_models[i] = None  # type: ignore[index]
+        return instance
+
+    # T-M3.3 から `reverse_sample` を re-export して staticmethod alias 化する想定 (thin alias)
+    # T-M4.3 (RTF) が GAN/Diff 横断で `model.synthesize(mel)` を呼べるようにする dispatch 用
+    # synthesize = staticmethod(reverse_sample)  # T-M3.3 完成後に有効化
 ```
 
 ### 2.3 使用するハイパーパラメータ / 定数
@@ -396,6 +413,12 @@ class DiffWaveNext2(nn.Module):
 #### `from_config` factory
 - [ ] `test_from_config`: `DiffWaveNext2.from_config({"sub_model_cfg": {...}})` で生成可、`isinstance(model, DiffWaveNext2)`
 - [ ] `test_from_config_empty`: `DiffWaveNext2.from_config({})` でも default の `sub_model_cfg={}` で生成可
+- [ ] `test_from_config_lazy_instantiation`: `DiffWaveNext2.from_config({"sub_model_cfg": {...}}, only_sub_model=1)` で `sub_models[0]` のみ `SubModelDiff` instance、`sub_models[1]`, `sub_models[2]`, `sub_models[3]` が `None` placeholder。`state_dict()` に `sub_models.0.*` のみ含まれること (None は state_dict 出力されない) も確認
+- [ ] `test_from_config_lazy_instantiation_invalid_k`: `only_sub_model=0` / `only_sub_model=5` で `ValueError`
+- [ ] `test_from_config_lazy_param_count`: `only_sub_model=k` 指定時に `sum(p.numel() for p in model.parameters()) ≈ 14.42M` (1 sub-model 分のみ)、OOM 回避効果を検証
+
+#### `synthesize` alias (T-M3.3 完成後に有効化)
+- [ ] `test_synthesize_alias` (`@pytest.mark.skipif(reverse_sample 未実装)`): `model.synthesize(mel)` の戻り値が `reverse_sample(model, mel)` と同等 (T-M3.3 完成後)。T-M4.3 (RTF) の `getattr(model, "synthesize", model.forward)` dispatch を担保
 
 ### 5.2 e2e / 結合テスト
 - [ ] `test_diff_wavenext2_with_real_sub_model_cfg`: `configs/diff_wavenext2.yaml` の sub_model_cfg を読んで `DiffWaveNext2.from_config(cfg)` で生成、forward が動作 (T-M3.2 の YAML 読み込み経路を模す)
@@ -424,6 +447,17 @@ class DiffWaveNext2(nn.Module):
 ## 6. 懸念事項
 
 ### 6.1 技術的リスク
+
+#### CRITICAL候補: MSE loss の per-sub-model scale 不均衡
+
+- **問題**: ε-prediction で MSE loss を取ると、sub-model k による c の値域差が loss scale 差として顕在化する
+  - sub-model 1 (`c ∈ [0.9929, 1.0)`、`c≈0.999`): `x_t ≈ eps` (純ノイズ側)、`eps_pred` 予測対象が dominant component → loss ~ O(1)
+  - sub-model 4 (`c ∈ [0, 0.4817)`、`c≈0.3`): `eps` の `x_t` 寄与が小さく `x_0` 寄与が大きい → eps 予測は容易、loss ~ O(0.1)
+- **影響**:
+  - TensorBoard で sub-model 別の `loss_mse` が **1〜2 桁ズレる** ことが前提 (見た目の不均衡で「sub-model 4 が学習していない」と誤判定しないよう注意)
+  - sub-model 別に lr を変える ablation のトリガー (§8.1 案 11、§10)
+- **対応**: 本チケット v1 では同一 lr で全 sub-model 訓練 (`docs/training.md` §3.4 通り)、M5.2 smoke で scale 不均衡を観察してから ablation 検討
+- **救命策**: §6.1 通常項目「v-prediction parameterization」(Salimans & Ho 2022) を M3.5 smoke で loss 学習されない場合に切替検討
 
 #### CRITICAL候補: `BAND_BOUNDS` の数値が `docs/architecture.md` §5 と完全一致するか
 
@@ -484,6 +518,18 @@ class DiffWaveNext2(nn.Module):
 - **記録**: 本判断を本チケット §8.2 / §9.1 に明示記録、T-M2.4 §8.2 / §9.1 にも参照リンクを追記
 
 #### 通常項目
+
+- **`register_buffer(persistent=True)` で `state_dict` に schedule 16B×4=64B 重複保存**:
+  - 各 sub-model の `STFTModule.window` (n_fft+1 float32) と合わせて、buffer の冗長性が積み上がる
+  - **影響**: M6 で `keep_last_n=5 × 4 sub` = 20 ckpt × 14.42M weight ≈ 11 GB に対し誤差レベル (無視可能)
+  - **将来の BDDM 学習で schedule mismatch が起きる場合**: `strict=False` で load_state_dict 推奨 or `persistent=False` で skip
+  - **本チケット v1 採用**: `persistent=True` (整合性チェック優先)、再評価は M6.2 本格訓練時
+
+- **v-prediction parameterization (Salimans & Ho 2022) 選択肢**:
+  - **問題**: ε-prediction だと §6.1 critical「per-sub-model scale 不均衡」が顕在化 (sub-model 1 で loss 大、sub-model 4 で消える)
+  - **v-prediction**: `v = sqrt(abar) * eps - sqrt(1-abar) * x_0` を予測ターゲット化、SNR-weighted で scale 均衡化
+  - **本チケット v1 採用**: ε-prediction (`docs/architecture.md` §5 / `docs/training.md` §3.1 の論文準拠)
+  - **救命策トリガー**: M3.5 smoke で loss が学習されない / sub-model 別 loss 差が 2 桁以上の場合、v-prediction に切替検討 (`SubModelDiff.forward` の出力意味変更が必要、影響範囲大)
 
 - **`forward(mel, x_t, c, k)` の引数順序と `nn.Module.forward` 慣例**:
   - PyTorch の `nn.Module.forward` は positional 引数を想定するが、本クラスは `k: int` (Tensor ではない discrete index) を最後に取る
@@ -612,6 +658,27 @@ class DiffWaveNext2(nn.Module):
   - 4 一括 forward は推論時の `reverse_sample` (T-M3.3) で必要だが、これは内部で逐次 sub-model[t] を呼ぶだけ
   - 一括 API を提供すると、`reverse_sample` の DDPM step を 4 サブモデル一括に書き換える際に、step ごとに schedule index ↔ sub-model index の対応を取る複雑度が増す
 
+- **`from_config(cfg, only_sub_model: int | None = None)` lazy instantiation を v1 採用**:
+  - 採用昇格 (旧 §8.1 案 10 関連の拡張、独立採用判断)
+  - 4 sub-model 全 instantiate (`only_sub_model=None`、default) と、1 sub-model のみ instantiate (`only_sub_model=k`) を切替可能化
+  - `only_sub_model=k` 指定時: 対象 sub-model `k` のみ Module、`sub_models[other_idx] = None` placeholder で `state_dict()` 互換維持
+  - 理由:
+    - **T-M3.2 で 1 sub-model のみ訓練するときの OOM 回避**: 4×14.42M=~58M weight + optimizer state (Adam の m/v で 2×) = 訓練対象でない 3 sub-model 分が memory 占有
+    - **M6.2 32h 訓練の wall-clock 短縮**: 4 sub-model 並列訓練 (別ジョブ) で各ジョブが 1 sub-model 分の memory のみ確保、ジョブあたり VRAM 余裕が大きい → batch_size 拡大可能
+  - 別案 (置換可能): YAML config の `sub_model_cfg.skip_indices: [2, 3, 4]` を読んで skip → 却下 (config 階層が肥大、CLI 引数経由のほうが train スクリプトとの結合が natural)
+  - 再評価トリガー: M5.2 / M6.2 で OOM が発生しない場合は default の 4 全 instantiate のみで十分
+
+- **`DiffWaveNext2.synthesize = staticmethod(reverse_sample)` thin alias を v1 で追加** (T-M3.3 から re-export):
+  - 採用昇格 (T-M4.3 RTF measurement で GAN/Diff 横断 dispatch を簡素化)
+  - T-M3.3 完成後に `from wavenext2.inference.infer_diff import reverse_sample` を import して `synthesize = staticmethod(reverse_sample)` を class level で追加
+  - 理由:
+    - **T-M4.3 (RTF) が `getattr(model, "synthesize", model.forward)` で GAN/Diff 統一 dispatch 可能**:
+      - GAN: `synthesize` = `forward` の自然 alias (逐次 fixed-point iteration が forward)
+      - Diff: `synthesize` = `reverse_sample` の alias (4-step DDPM 逆プロセス)
+    - **`model.synthesize(mel)` で API 表記統一**: 訓練 (`forward`) と推論 (`synthesize`) の責務分離を class API として明示
+  - 別案: T-M3.3 で `model.reverse_sample` 本実装を入れる → 採用 (synthesize は staticmethod alias、本実装は reverse_sample にあるか class method として注入)
+  - 再評価トリガー: T-M4.3 で `getattr` dispatch が必要なくなる (例えば protocol class を抽出する) 場合は alias 不要
+
 #### Deprecated (却下案)
 
 1. **shared sub-model (4 個で同じパラメータ使い回し)**
@@ -656,6 +723,24 @@ class DiffWaveNext2(nn.Module):
     - メリット: schedule を YAML で variant 化可能 (将来の K=8 拡張等)
     - 採用候補: 本チケット v1 では class attribute hardcode、`from_config` は `sub_model_cfg` のみ。schedule 変更は別 ticket (M6.3 ablation 等) で扱う
 
+11. **log-uniform sampling** (`sample_noise_level` の mode 引数化)
+    - **設計**: `sample_noise_level(k, batch_size, mode: Literal["uniform", "log_uniform"] = "uniform")` で切替可能化
+    - **uniform** (現状 default): `torch.empty(B).uniform_(L, U)` (区間内一様)
+    - **log_uniform**: `exp(uniform(log(L), log(U)))` (対数スケールで一様)
+    - **メリット**:
+      - sub-model 4 (`c ∈ [0.0, 0.4817)`) は線形 uniform だと `c≈0` 付近 (signal-rich 領域) の確率質量が小さい
+      - 対数スケール sampling で `c≈0` 付近に確率質量集中、loss scale バランス改善期待 (§6.1 critical「per-sub-model scale 不均衡」の緩和策)
+    - **注意**: sub-model 4 の lower bound が 0.0 なので `log(0)=-inf` で数値不安定。実装時は `max(L, 1e-6)` で clipping 必要
+    - **本チケット v1 採用**: uniform (`docs/training.md` §3.2 「band 内 uniform sampling」論文準拠)
+    - **再評価トリガー**: M5.2 smoke で sub-model 4 が学習しない (loss が初期値から下がらない) 場合に log_uniform 切替検討
+
+12. **`__init_subclass__` で BAND_BOUNDS validation 1 度のみ**
+    - **問題**: 現状 `_validate_band_bounds()` を classmethod として `__init__` 内で呼ぶため、4 sub-model instantiate ごとに 4 回呼ばれる (CI で冗長)
+    - **改善案**: `__init_subclass__(cls, **kwargs)` で class 定義時に 1 度だけ validation 実行 (BAND_BOUNDS は class attribute なので class level で十分)
+    - 別案: `__init__` の最初に `if not hasattr(type(self), "_validated"): self._validate_band_bounds(); type(self)._validated = True` で class level flag
+    - **本チケット v1 採用**: classmethod 4 回呼び出し維持 (validation cost が小さく optimization 不要)、CI 冗長性が問題になれば `__init_subclass__` 化
+    - **再評価トリガー**: CI 実行時間で validation が顕在化する場合 (PyTorch import overhead より大きいことは現実的に皆無)
+
 #### 再評価トリガー条件
 | 設計判断 | 再評価タイミング | 想定変更 |
 |---|---|---|
@@ -668,6 +753,12 @@ class DiffWaveNext2(nn.Module):
 | `STFTModule` window 共有 | M3.1 完了後の memory profiling | 16KB 節約効果は皆無なので不採用維持の見込み |
 | `forward(mel, x_t, c, k)` の引数順序 | M5 phase review | k を kwarg-only にするか検討 |
 | `sample_noise_level` の device 引数 | T-M3.2 実装時 | multi-GPU DDP で non-blocking transfer が問題になれば追加 |
+| `sample_noise_level` の mode 引数 (uniform / log_uniform) | M5.2 smoke | sub-model 4 が学習しない場合に log_uniform 切替 (§8.1 案 11) |
+| `__init_subclass__` での BAND_BOUNDS validation | CI 実行時間プロファイル時 | classmethod 4 回呼び出しが CI コストになる場合 (§8.1 案 12) |
+| MSE loss の per-sub-model scale 不均衡 → sub-model 別 lr | M5.2 smoke | TensorBoard で sub-model 別 loss が 1〜2 桁ズレた場合に ablation (§6.1 critical / §10) |
+| v-prediction parameterization 切替 | M3.5 smoke | loss が学習されない / scale 差 2 桁以上 (§6.1 通常項目) |
+| `from_config(only_sub_model=k)` lazy instantiation | M5.2 / M6.2 | 4 全 instantiate で OOM が発生しない場合は default のみで十分 |
+| `synthesize` staticmethod alias | T-M4.3 設計時 | protocol class 抽出等で `getattr` dispatch 不要になれば削除 |
 
 ### 8.2 思想 / 哲学の見直し
 
@@ -682,6 +773,21 @@ class DiffWaveNext2(nn.Module):
   - 両者の forward signature の差は本質的 (アルゴリズムの違い)、`BaseVocoder` で抽象化すると低レベル化して可読性低下
   - 共通化するなら `from_config()` factory のみだが、sub-model level (T-M1.6 §8.2) で既に factory パターンが確立しているため上位での factory 統一は冗長
   - **記録**: T-M2.4 §8.2 / §9.1 に「M3.1 で不採用確定」を追記、本チケット §6.1 と §8.2 に判断記録
+- **`forward` 死蔵 API 問題**:
+  - **問題**: T-M3.2 (`train_diff.py`) line 337 (想定) で `sub_models[k-1](mel, x_t, c)` を直接呼ぶ実装になっており、`DiffWaveNext2.forward(mel, x_t, c, k)` が **死蔵 API** 化する
+    - 訓練 step: T-M3.2 は `model.sub_models[k-1](mel, x_t, c)` で sub-model 直叩き (model 経由のオーバーヘッド回避、grad isolation 明示)
+    - 推論 step: T-M3.3 reverse_sampler も `model.sub_models[t-1](mel, x, c)` で直叩き想定
+    - → `DiffWaveNext2.forward` が誰からも呼ばれない可能性
+  - **対応案**:
+    - 案 A: `forward` を `@deprecated` 扱い (将来削除予告)、dispatch は consumer 側 (T-M3.2 / T-M3.3) で統一
+    - 案 B: `forward` を削除して `DiffWaveNext2` は容器 (sub_models container) に徹する設計
+    - 案 C: 現状維持 (`forward` 提供、consumer は使うも使わないも自由)
+  - **本チケット v1 採用**: **案 A** (`@deprecated` 扱い、消極的維持)
+    - 理由: `nn.Module` の慣例として `forward` 定義は推奨される (torch.nn.Module.__call__ が forward を呼ぶ前提)
+    - consumer 側 (T-M3.2 / T-M3.3) で sub_models 直叩きする設計を採用するが、`forward` も動作する状態は維持 (テストでも検証)
+    - docstring に「consumer は `sub_models[k-1]` 直叩き推奨、`forward` は abstraction layer」と明記
+  - **再評価トリガー**: T-M3.2 / T-M3.3 完成時に `forward` の利用箇所が 0 件なら案 B (削除) 検討
+
 - **インターフェース定義の見直し余地**:
   - **`forward(mel, x_t, c, k)` の引数 `k` の位置**: 現状 positional 最後だが、kwarg-only (`*` で強制) にする案も可。M5 phase review で再評価
   - **`sample_noise_level` の戻り値を `(B,)` の Tensor から `(B, 1)` に変更**: SubModelDiff.forward の c 引数 shape が `(B,)` なので一致、不要。`(B,)` で確定
@@ -712,8 +818,14 @@ class DiffWaveNext2(nn.Module):
   ```python
   from wavenext2.models.diff_wavenext2 import DiffWaveNext2
 
-  # YAML config から
+  # YAML config から (4 sub-model 全 instantiate, 通常)
   model = DiffWaveNext2.from_config({"sub_model_cfg": cfg.sub_model})
+
+  # 1 sub-model のみ instantiate (lazy、OOM 回避 / wall-clock 短縮、§8.1 採用昇格)
+  k = args.sub_model_k  # CLI 引数 (1..4)
+  model = DiffWaveNext2.from_config({"sub_model_cfg": cfg.sub_model}, only_sub_model=k)
+  # → model.sub_models[k-1] のみ Module、他は None placeholder
+
   # または直接
   model = DiffWaveNext2(sub_model_cfg=cfg.sub_model)
 
@@ -743,10 +855,19 @@ class DiffWaveNext2(nn.Module):
   ```
 - **重要事項**:
   - **k は CLI 引数 or YAML config で 1..4 を指定** (1 sub-model ずつ独立訓練)
+  - **`from_config(only_sub_model=k)` で 1 sub-model のみインスタンス化、他は None で skip** (OOM 回避、wall-clock 短縮、§8.1 採用昇格)
+    - `model.sub_models[k-1]` のみ Module、`model.sub_models[other_idx] is None`
+    - optimizer は `model.sub_models[k-1].parameters()` のみを対象に作成 (None placeholder の parameters() は呼ばない)
+    - state_dict 互換維持: `model.state_dict()` には `sub_models.{k-1}.*` のみ含まれる (None は serialize されない)
+    - resume 時は同じ k で `only_sub_model=k` 指定すれば `load_state_dict(strict=True)` で OK
   - **`sample_noise_level(k, B)` の戻り値は CPU tensor**、`.to(mel.device)` で移動が必要
   - **4 sub-model それぞれ独立に checkpoint 保存**: `checkpoints/diff/sub_1.pt`, ..., `sub_4.pt`
   - **band 内 uniform sampling** が TensorBoard で確認可能 (各 step の c のヒストグラム plot を推奨)
+  - **per-sub-model loss scale 不均衡を TensorBoard で観察** (§6.1 critical、§9.1 T-M5.2 連絡):
+    - sub-model 1 で loss ~ O(1)、sub-model 4 で loss ~ O(0.1) を前提として view
+    - **sub-model 別 lr を変える ablation トリガー判断**: 4 sub-model 間で loss が桁違いに学習速度が異なる場合
   - **`forward(mel, x_t, c, k)` の backward** は sub_models[k-1] のみに grad、他 sub-model の `model.parameters()` イテレーション時に grad=None を許容する必要あり (optimizer は sub-model k のみを対象に作成)
+  - **`forward` 死蔵 API 問題** (§8.2): consumer は `model.sub_models[k-1](mel, x_t, c)` 直叩き推奨 (model 経由のオーバーヘッド回避、grad isolation 明示)、`forward` は abstraction layer として残るが consumer 側統一
   - **Optimizer**: Adam(lr=2e-4, betas=[0.9, 0.98], wd=0)、`docs/training.md` §3.4
 
 #### T-M3.3 (reverse_sampler) へ
@@ -773,6 +894,8 @@ class DiffWaveNext2(nn.Module):
   - **`model.sub_models[t](mel, x, c)`** で SubModelDiff の forward を直接呼ぶ (DiffWaveNext2.forward 経由でも OK)
   - **post-filter 適用は T-M3.4 で実装**、reverse_sampler は post-filter 適用前の x_0 を返す
   - **`model.reverse_sample(mel)` 本実装 or 外部関数** どちらにするかは T-M3.3 で決定
+  - **`synthesize` alias から呼ばれる前提**: T-M3.1 で `DiffWaveNext2.synthesize = staticmethod(reverse_sample)` を再エクスポート (§8.1 採用昇格)。T-M4.3 (RTF) が `model.synthesize(mel)` で GAN/Diff 横断 dispatch する
+  - **全 sub-model がロードされている前提**: reverse_sampler は 4 sub-model すべてを順に呼ぶため、`only_sub_model` lazy instantiation は推論時に使用不可。推論用 model は `DiffWaveNext2.from_config(cfg)` (only_sub_model=None) で作成し、各 sub-model checkpoint を `model.sub_models[k-1].load_state_dict(torch.load(f"sub_{k}.pt"))` で個別 load
 
 #### T-M4.3 (RTF measurement) へ
 - **使用方法**:
@@ -793,11 +916,28 @@ class DiffWaveNext2(nn.Module):
   - `torch.no_grad()` 内で測定
   - CPU 測定は `torch.set_num_threads(1)`、GPU 測定は `torch.cuda.synchronize()`
   - 4-step reverse sampling 全体の推論時間を測定 (sub_model forward 4 回 + DDPM step computation)
+  - **`model.synthesize(mel)` で GAN/Diff 横断計測** (§8.1 採用昇格):
+    - T-M3.1 の `DiffWaveNext2.synthesize = staticmethod(reverse_sample)` alias 経由
+    - `getattr(model, "synthesize", model.forward)` で GAN (forward が synthesize 相当) / Diff (synthesize=reverse_sample alias) を統一 dispatch
+    - RTF 測定ループは `synthesize_fn = getattr(model, "synthesize", model.forward); _ = synthesize_fn(mel)` でモデル非依存に書ける
 
 #### T-M3.5 (Diff smoke training) へ
 - **使用方法**:
   - 1 utterance × 1000 step で sub-model 1 (k=1) を訓練し `MSE loss < 初期値の 5%` を期待 (`docs/milestones.md` §M3.5)
   - 失敗時の first action: `k=1` の代わりに `k=4` (低ノイズ side、訓練が容易) で試す / batch_size を減らす
+
+#### T-M5.2 (smoke 統合) へ
+- **per-sub-model loss scale 不均衡を TensorBoard で観察** (§6.1 critical 候補):
+  - sub-model 別に `loss_mse` を log し、TensorBoard で 4 系列を重ね描画
+  - sub-model 1 (`c≈0.999`): loss ~ O(1)、sub-model 4 (`c≈0.3`): loss ~ O(0.1) を **前提として view**
+  - 「sub-model 4 が学習していない」と誤判定しないよう、loss 値ではなく **「初期値からの相対減少率」** を見る
+- **ablation トリガー判断**:
+  - 4 sub-model 間で loss の絶対値ではなく **学習速度 (相対減少率)** が桁違いに異なる場合 → sub-model 別 lr ablation 検討 (§8.1 案 11、§10)
+  - sub-model 4 が学習しない (1000 step で初期値の 80% 以上) → log_uniform sampling 切替 (§8.1 案 11) or v-prediction parameterization 切替 (§6.1 通常項目)
+- **観察項目**:
+  - 各 sub-model k の `loss_mse` 推移
+  - 各 sub-model k の c (noise level) ヒストグラム (band 内 uniform を確認)
+  - 各 sub-model k の `eps_pred` の norm (sub-model 1 / 4 で 1〜2 桁差を確認)
 
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:

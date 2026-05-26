@@ -364,6 +364,13 @@ def reverse_sample(
 - [ ] `test_t_mel_short`: `T_mel=8` (短発話相当) でも shape 整合
 - [ ] `test_model_eval_not_forced`: 本関数は `model.eval()` を呼ばない (呼び出し側責務、§6.1 参照)。`model.train()` 状態で呼んでも例外を上げず動く (sub-model に dropout がない前提で deterministic、§6.1 で再評価)
 
+#### CRITICAL safety nets (§6.1 critical 由来)
+- [ ] **`test_no_negative_beta_used`** (Critical): `β` を使わない式で reverse step が成立することを assert。`_compute_ddpm_coefficients` の戻り値に β が存在しない、または β が含まれていても reverse_sample が β を **forward path で参照しない** ことを確認。`abar = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]` で `reverse_sample` を実行して NaN/Inf が出ないこと (β 負値が NaN にならない設計の証明)
+- [ ] **`test_sigma_indexing_consistency`**: `σ_t` の index が `β_next` (= 1 つ先の遷移用 noise) と整合。論文 / FastDiff の手計算と 1 例 pin (例: `σ[0]` が `(1-ᾱ_0)/(1-ᾱ_1) · (1-α_1)` 形で計算されているか、α-based formula で確認)
+- [ ] **`test_stochastic_flag`**: `stochastic=True` (DDPM standard) と `stochastic=False` (DDIM η=0) で **異なる出力**。同 seed でも stochastic フラグが切り替われば出力が変わる
+- [ ] **`test_seed_with_external_generator`**: `gen = torch.Generator(device).manual_seed(2025)` を外部から注入で deterministic、global RNG (`torch.initial_seed()`) は変化しない
+- [ ] **`test_eval_mode_context`**: `eval_mode(model)` context manager が `model.training` を一時的に `False` にし、`__exit__` で元に戻すこと (BatchNorm/Dropout の eval 状態確認)
+
 ### 5.2 e2e / 結合テスト
 - [ ] `test_with_real_diff_model`: `DiffWaveNext2.from_config(cfg)` 経由で実 model を生成 (T-M3.1 完了後)、`mel = torch.randn(1, 128, 32)` で `reverse_sample(model, mel)` が `(1, 8192)` を返し NaN/Inf なし
 - [ ] `test_reverse_sample_integration` (`@pytest.mark.slow`): `T-M3.5` 想定の 1 utterance smoke (`mel` は実際の `extract_mel.py` 出力) で reverse_sample が動作。T-M3.5 で実音声テストするため本チケットでは smoke ではなく実 mel + 未訓練 model で「動く」だけ確認
@@ -390,6 +397,46 @@ def reverse_sample(
 ## 6. 懸念事項
 
 ### 6.1 技術的リスク
+
+#### CRITICAL [最優先]: `β_t` 負値問題 (実装着手時の最重要確認事項)
+- **問題**: `NOISE_SCHEDULE_ABAR = [1.0e-4, 2.8e-2, 5.6e-1, 9.1e-1]` に対して標準 DDPM の `β_t = 1 - ᾱ_t / ᾱ_{t-1}` を **adjacent indices に直接適用すると β が負値になる**
+  - 計算例: `β[1] = 1 - ᾱ[1] / ᾱ[0] = 1 - 2.8e-2 / 1.0e-4 = 1 - 280 = -279`
+  - 同様に `β[2] = 1 - 5.6e-1 / 2.8e-2 = 1 - 20 = -19`、`β[3] = 1 - 9.1e-1 / 5.6e-1 ≈ -0.625`
+  - **根本原因**: 論文の 4 点 schedule は **連続 DDPM schedule (通常 T=1000) のサブサンプリング** であり、`ᾱ_{t-1}` は「直前 step」ではなく「数百 step 前」の値。**adjacent indices 間の β は意味を持たない (実質 3-step skip)**
+- **影響範囲**:
+  - §2.2 擬似コードの `beta[1:] = 1.0 - abar[1:] / abar[:-1]` がそのまま動作すると β[1], β[2], β[3] が負
+  - reverse step の式 `1/√(1-β_next)` を含む箇所で `1 - β_next < 0` となり **`sqrt(負値) → NaN` 確定**
+  - 同じく `σ_t = √(β_{t+1}·(1-ᾱ_t)/(1-ᾱ_{t+1}))` でも `β_{t+1} < 0` なら `sqrt(負値) → NaN`
+  - `coef["beta"][0] = 1 - 1e-4 = 0.9999` (正値) は問題ないが、`coef["beta"][1:]` が全滅する
+- **本チケット実装着手時の最優先確認事項** (実装前に必ず手計算で 1 例 pin):
+  1. **β を使わない式で reverse step を再導出**: DDPM Eq.11 を変形すると `β_t / √(1-ᾱ_t)` と `1/√(1-β_t)` の組み合わせは `α_t = 1 - β_t = ᾱ_t / ᾱ_{t-1}` を使えば `√(ᾱ_{t-1}/ᾱ_t)` で書き直せる
+  2. `α_t = ᾱ_t / ᾱ_{t-1}` (これは β_t と違って sub-sampling でも意味あり、`α_t < 1` であれば良い)
+  3. `σ_t² = (1 - ᾱ_{t-1}) / (1 - ᾱ_t) · (1 - α_t)` を skip 認識で計算 (= `(1-ᾱ_{t-1})/(1-ᾱ_t) · β_t` だが β は不使用)
+  4. FastDiff (`Rongjiehuang/FastDiff/utils/util.py` の `compute_diffusion_params` 等) / BDDM (`tencent-ailab/bddm/sampler/sampler.py` の DDPM ブランチ) の **schedule sub-sampling 対応コード** を参照、`β` を直接計算していないことを確認
+- **修正案** (実装時):
+  - `_compute_ddpm_coefficients` で β を **計算しない** (キーから削除) OR `α_t = ᾱ_t / ᾱ_{t-1}` のみ計算し、reverse step の式を α / √ᾱ / √(1-ᾱ) のみで書き直す
+  - reverse step を `x_{t-1} = √(ᾱ_{t-1}/ᾱ_t) · (x_t - √(1-ᾱ_t)·ε) + √(ᾱ_{t-1}) · ε_corrected + σ_t · z` 形式に書き換え (BDDM 流の skip-aware DDPM)
+  - 慣例 `ᾱ_0 = 1` の解釈も再検討: t=1 (denoising 順最初) では `ᾱ_{t-1} = 1` で `α_1 = ᾱ_1 / 1 = 1e-4`、これは「ほぼ全てがノイズ」を意味し物理的整合
+- **数値検証**:
+  - β を使わない reverse step の式が `√(1-ᾱ)` と `√(ᾱ)` のみで成立することを **論文 Eq. 11 と FastDiff コードで再確認**
+  - 4 点それぞれで手計算: `α_1 = 1e-4`, `α_2 = 2.8e-2/1e-4 = 280`, `α_3 = 5.6e-1/2.8e-2 = 20`, `α_4 = 9.1e-1/5.6e-1 ≈ 1.625` ← **α > 1 もまた DDPM の前提 (`α ≤ 1`) を破る!**
+  - これは「論文 schedule そのものが連続 DDPM の sub-sampling 結果であり、adjacent transition は通常の forward process では表現できない」ことを意味する → **本実装は forward process の reverse ではなく、4 つの "denoising fixed point" を順に通過する形式 (BDDM-style 4-step skip-sampling)** で再定式化が必須
+- **検知タイミング**:
+  - **実装着手前**: 手計算 1 例で `β[1] = -279` を確認、設計を修正
+  - **T-M3.3 unit test (5.1)**: `test_no_negative_beta_used` (5.5 で追加) で β を使わない式で reverse step が成立することを assert
+  - **T-M3.5 smoke**: NaN/Inf の出現を即検知、出れば本チケット再オープン
+- **未解決のまま実装すると**: **NaN 確定** → T-M3.5 smoke で全 utterance NaN → 訓練不能 → M3 全体が停止する **重大バグ**
+
+#### CRITICAL: `σ_t` indexing off-by-one リスク
+- **問題**: §2.2 擬似コードでは `coef["sigma"][idx]` (idx = t-1) で σ を引いているが、DDPM 原典では `σ_t` は **「次 step に向かう noise」** であり、1-indexed の `σ_{t+1}` (= 0-indexed の `σ[idx+1]`) を引く方が正しい場合がある
+- **混乱の根源**:
+  - 「t で sub-model を呼び、`x_{t-1}` を作る」過程で噛む σ は `σ_{t-1}` (`x_{t-1}` への注入) か `σ_t` (`x_t` から `x_{t-1}` への遷移) か論文 / 実装で異なる
+  - `coef["sigma"][idx] = σ_t` (denoising 順 t での出口)、`coef["beta"][t] = β_{t+1}` (1 つ先) で **index 規約が混在**
+- **本チケット採用**: 内部 0-indexed で `sigma[idx]` が `β_next` (= `coef["beta"][t]`) と整合するように **手計算で 1 例 pin する**
+- **検知タイミング**:
+  - **T-M3.5 smoke 前**: 1 utterance × 既知 seed で 1 step だけ手計算実行、`sigma[0]` と `beta[1]` (= `coef["beta"][1]`) の組み合わせが期待値と一致するか pin
+  - **T-M3.3 unit test (5.1)**: `test_sigma_indexing_consistency` (5.5 で追加) で σ_t の index が β_next と整合
+- **未解決のまま実装すると**: 偶然動くが品質低下 (off-by-one が音質を間接的に劣化)、M5.2 で MCD が想定より悪い形で気付く
 
 #### CRITICAL: `reverse_step` 式の正確性 (DDPM 論文 Eq.11 と整合確認)
 - **問題**: `docs/training.md` §4.2 の擬似コードと DDPM 標準形 (Ho et al., 2020 Eq.11) の **添字対応** が実装時に混乱しやすい
@@ -533,14 +580,28 @@ def reverse_sample(
 ### 8.1 別の設計を採るとしたら
 
 #### 採用設計
-- **`reverse_sample(model, mel, *, seed=None)` の 1 関数 + `_compute_ddpm_coefficients` pure helper、DDPM 標準形 4-step + 1-to-1 dispatch + 最終 step σ=0**
+- **`reverse_sample(model, mel, *, seed=None, stochastic=True)` の 1 関数 + `_compute_ddpm_coefficients` pure helper + `eval_mode` context manager helper、DDPM 標準形 4-step + 1-to-1 dispatch + 最終 step σ=0**
   - 理由:
     - (a) 1 関数で `from wavenext2.inference.infer_diff import reverse_sample` の唯一のエントリポイント、T-M3.4 / T-M3.5 / T-M4.3 が薄い wrapper で済む
     - (b) `_compute_ddpm_coefficients` を pure helper として切り出すことで unit test が容易 (式の正確性を mock 不要で検証可能)
     - (c) 1-to-1 dispatch は `docs/architecture.md` §5 / Table 1 で確定 (point-specialized partition、band 判定不要)
     - (d) `@torch.no_grad()` で勾配グラフ非構築、推論専用
-    - (e) `seed: int | None = None` で stochastic / deterministic の 1 引数切替、API 単純化
+    - (e) `seed: int | torch.Generator | None = None` で stochastic / deterministic / external generator 注入の 3 形式を 1 引数切替、global RNG 非汚染
     - (f) 最終 step σ=0 は `docs/training.md` §4.2 完全準拠 (DDPM 原典は通常 σ_t を全 step 適用するが、4-step BDDM 風では最終 step decoder-like が慣例)
+    - (g) **`stochastic: bool = True` を v1 化**: 4-step (K=4) の reverse process では中間 σ·z の stochasticity が品質を主導するため、DDPM 標準 (True) と DDIM η=0 (False) の両方を default 実装し、CLI で切替可能化 (M3 phase review 結果、§8.1 採用昇格)
+    - (h) **`@contextmanager def eval_mode(model)` helper** を切り出し、`reverse_sample` 内で常時使用 (副作用なし、`model.train(prev_training)` で復元、`prev_training = model.training; model.eval(); yield; model.train(prev_training)`)。T-M3.4 / T-M3.5 / T-M4.3 が全部 `model.eval()` を書く重複を避ける (M3 phase review 結果)
+
+#### 検討追加 (M3 phase review 結果)
+
+- **`variance_type: Literal["small", "large"] = "small"`**: Ho 2020 では `σ_t² = β_t` (large variance、DDPM 原典の simple version) と `σ_t² = β_t·(1-ᾱ_{t-1})/(1-ᾱ_t)` (small variance、IDDPM 形式) の 2 種比較あり
+  - 論文 §3.3 では ambiguous (具体的な σ_t² の形式は明記なし)
+  - **本チケット v1**: small variance を default (`docs/training.md` §4.2 採用)、`variance_type` 引数を将来追加可能化
+  - **再評価タイミング**: M3.5 smoke 後の品質確認時、large vs small で MCD / UTMOS 比較
+
+- **`seed: int | torch.Generator | None = None` に拡張**: int 1 つだけでなく外部から `torch.Generator` を注入可能化
+  - **理由**: M3.4 post-filter fit (200 utterance) と T-M4.3 RTF (warmup 含む反復測定) で **global RNG を汚染しない** ため、外部 Generator を注入したい
+  - **実装**: `if isinstance(seed, torch.Generator): gen = seed; elif isinstance(seed, int): gen = torch.Generator(device).manual_seed(seed); else: gen = None`
+  - **v1 で採用**: M3 phase review 結果、複雑度が低く下流タスクに有用
 
 #### Deprecated (却下案)
 
@@ -622,8 +683,12 @@ def reverse_sample(
   - 将来 `BaseVocoder.synthesize(mel)` のような統一 API を抽出するかは **M3 phase review** で再評価 (T-M2.4 §8.2 で「M3.1 着手前に判断」と申し送り)
 - **`reverse_sample` を `DiffWaveNext2.synthesize(mel)` method に統合する案**:
   - メリット: GAN の `model(mel)` と API 統一
-  - 却下 (v1): 関数として独立させた方が test しやすい (mock 化容易)、`DiffWaveNext2` 本体がシンプル
-  - 採用代替: `DiffWaveNext2.synthesize = reverse_sample` の thin alias 追加 (§9 検討)
+  - 却下 (v1 関数本体は分離): 関数として独立させた方が test しやすい (mock 化容易)、`DiffWaveNext2` 本体がシンプル
+  - **採用代替 (M3 phase review で昇格): `DiffWaveNext2.synthesize = reverse_sample` thin alias を **今すぐ T-M3.3 内に実装する** (T-M3.1 で既に採用済み、本チケットから re-export して整合保持)
+    - **理由**: T-M4.3 (RTF) は GAN/Diff 横断で `model.synthesize(mel)` を測りたいため、両モデルで `synthesize` API が揃っていることが望ましい
+    - **実装場所**: `infer_diff.py` 末尾で `DiffWaveNext2.synthesize = reverse_sample` を 1 行追加 (monkey-patch、import side effect)
+    - **代替実装**: `DiffWaveNext2.synthesize` を T-M3.1 内で `def synthesize(self, mel, **kw): from wavenext2.inference.infer_diff import reverse_sample; return reverse_sample(self, mel, **kw)` 形式で定義 (circular import 回避のため遅延 import)
+    - **T-M3.1 との整合**: T-M3.1 §9 で本件を申し送り、両チケットで実装合意
 - **`_compute_ddpm_coefficients` を `DiffWaveNext2` の class method に統合する案**:
   - メリット: model と coefficients の責務統一
   - 却下 (v1): pure helper として切り出した方が unit test 容易、再利用性高 (将来 DDIM 等で別 step 数を使う際にも流用可)
@@ -637,6 +702,12 @@ def reverse_sample(
 
 ### 9.1 後続チケットに渡す情報
 
+#### T-M3.1 (DiffWaveNext2) から受領 (M3 phase review)
+- **`synthesize` alias を T-M3.3 内に実装**: `DiffWaveNext2.synthesize = reverse_sample` (`infer_diff.py` 末尾の import side effect、または T-M3.1 内で遅延 import 形式の method として定義)
+- **理由**: T-M4.3 (RTF 測定) は GAN / Diff 横断で `model.synthesize(mel)` を測りたい (両モデルで API 統一)
+- **実装位置**: `infer_diff.py` 末尾の 1 行 `DiffWaveNext2.synthesize = reverse_sample` (T-M3.1 側で重複実装を避ける)、または T-M3.1 内で thin wrapper method を定義 (circular import 回避のため遅延 import)
+- **T-M3.1 との同期点**: T-M3.1 §9 で本件を申し送り、実装の主管を確定
+
 #### T-M3.4 (post-filter) へ
 - **使用方法**:
   ```python
@@ -644,8 +715,8 @@ def reverse_sample(
   from wavenext2.inference.post_filter import apply_post_filter, load_fir
 
   fir = load_fir("checkpoints/diff/fir.npy")
-  # reverse sampling
-  y_synth = reverse_sample(model, mel, seed=42)         # (B, T_audio)
+  # reverse sampling (deterministic for fit reproducibility)
+  y_synth = reverse_sample(model, mel, seed=43)         # (B, T_audio)
   # post-filter (T-M3.4)
   y_post = apply_post_filter(y_synth, fir)              # (B, T_audio)
   ```
@@ -654,40 +725,52 @@ def reverse_sample(
   - **clamp(-1, 1) を post-filter 前に適用**: 本関数末尾で適用済み、T-M3.4 で convolution 後に再度 clamp が必要なら別途実装
   - **`clip_output: bool = True` 引数追加要否**: T-M3.4 が `clip_output=False` で「raw signal を受け取って自分で clip」を要求するなら本チケットを再オープン (§8.1 案 8)
   - **post-filter 適用は T-M3.4 の責務**、本関数は plain reverse sample のみ
+  - **M3 phase review 追加**: T-M3.4 (post-filter fit) で `seed=43` を `reverse_sample` 呼び出しに渡して deterministic 化、200 utterance の fit が再現可能に
+  - **`apply_post_filter` を `reverse_sample` の引数化検討**: `post_filter: np.ndarray | None = None` 引数を `reverse_sample` に追加し、与えられたら関数内で post-filter を適用する API も検討 (T-M3.4 実装時に判断、§8.1 案として追加可能)
 
 #### T-M3.5 (Diff smoke) へ
 - **使用方法**:
   ```python
-  model.eval()  # 必ず呼ぶ
-  with torch.no_grad():
+  # eval_mode helper を使う (M3 phase review)
+  from wavenext2.inference.infer_diff import reverse_sample, eval_mode
+  with eval_mode(model):  # model.training 状態を保護
       y_pred = reverse_sample(model, mel, seed=42)
   loss = mr_stft_loss(y_pred, x_gt)  # GT との比較
   ```
 - **重要事項**:
-  - `model.eval()` を **必ず呼ぶ** (本関数は内部で呼ばない、§6.1 critical)
+  - **β 負値問題が起きないことを 1 例手計算で先に pin** (§6.1 critical 最優先): smoke 実行前に `_compute_ddpm_coefficients([1e-4, 2.8e-2, 5.6e-1, 9.1e-1])` の戻り値を pytest で 1 例検証し、reverse step が NaN なく完走することを確認
+  - **smoke で NaN/Inf 確認**: 1 epoch 訓練後の reverse sample に `assert not torch.isnan(y_pred).any() and not torch.isinf(y_pred).any()`
+  - `model.eval()` を **必ず呼ぶ** か `eval_mode(model)` context manager を使う (本関数は内部で呼ばない、§6.1 critical)
   - `seed=42` で deterministic、`seed=None` で stochastic 性確認
   - 1 utterance × 1000 step 訓練後の reverse sample が GT に近づくことを確認 (milestones.md §M3.5)
+  - `stochastic=True/False` で品質比較 (DDPM vs DDIM η=0)、smoke 内で両方走らせて MR-STFT loss を pin (M3 phase review)
 
 #### T-M4.3 (RTF measurement) へ
-- **使用方法**:
+- **使用方法 (M3 phase review: `model.synthesize` で GAN/Diff 横断統一)**:
   ```python
-  model.eval()
-  with torch.no_grad():
+  from wavenext2.inference.infer_diff import eval_mode
+
+  with eval_mode(model):  # eval_mode helper を使う (副作用なし)
+      # GAN/Diff 横断で `model.synthesize(mel)` を測定 (両モデルで API 統一)
+      # warmup 用に外部 Generator を注入し global RNG 非汚染
+      warmup_gen = torch.Generator(device).manual_seed(0)
       for _ in range(warmup_steps):
-          _ = reverse_sample(model, mel)
+          _ = model.synthesize(mel, seed=warmup_gen)
       torch.cuda.synchronize()  # GPU 測定時
       start = time.perf_counter()
       for _ in range(measure_steps):
-          _ = reverse_sample(model, mel)
+          _ = model.synthesize(mel)  # 本番測定は stochastic で OK
       torch.cuda.synchronize()
       rtf = (time.perf_counter() - start) / measure_steps / (audio_length / sr)
   ```
 - **重要事項**:
-  - `model.eval()` を必ず呼ぶ (本チケット §6.1)
+  - `model.eval()` を必ず呼ぶ、または `eval_mode(model)` context manager を使う (本チケット §6.1)
+  - **`model.synthesize(mel)` で GAN/Diff 横断計測** (M3 phase review): T-M2.4 GAN と T-M3.3 Diff の API を `synthesize` で統一、T-M4.3 が両モデルで同じコードで RTF 測定可能
   - `@torch.no_grad()` は内部で適用済み (二重 wrap でも問題なし)
   - CPU 測定は `torch.set_num_threads(1)`、GPU 測定は `torch.cuda.synchronize()` で正確に
   - 論文 RTF (Diff 4-step): A100 / 1-core CPU の値は論文 Table 2 と比較
   - **`@torch.inference_mode()` 化**: 5%+ 速度向上が見られたら本チケットを再オープン (§8.1 案 6)
+  - **外部 Generator 注入で global RNG 非汚染** (M3 phase review): warmup phase で `torch.Generator` を注入し、`torch.initial_seed()` を変更しないこと
 
 #### T-M3.1 (DiffWaveNext2) へ (双方向同期)
 - **期待 attribute**:
@@ -712,12 +795,14 @@ def reverse_sample(
   - **`@torch.inference_mode()` への変更** (T-M4.3 RTF 測定時に判断): 5%+ 速度向上があれば変更
   - **batch ごとに別 seed** (M6.2 batch 推論時に判断): 必要性が出たら `seed: int | list[int]` に拡張
 - **将来検討事項** (§8.1 再評価トリガー表参照):
-  - DDPM 標準形 vs DDIM (M5.2 smoke 発散時)
+  - DDPM 標準形 vs DDIM (M5.2 smoke 発散時) — `stochastic: bool` を v1 採用済みなので CLI 切替可能
   - 4-step 以外の step 数 (M6.3 ablation)
-  - `force_eval` 引数追加 (M6.2 訓練後の推論時)
+  - `force_eval` 引数追加 (M6.2 訓練後の推論時) — `eval_mode` context manager を v1 採用済み
   - `clip_output` 引数追加 (T-M3.4 実装時)
   - `return_intermediates` 引数追加 (T-M3.5 smoke / 可視化要件発生時)
   - CLI entry point 追加 (T-M6.2 推論パイプライン構築時)
   - `torch.compile` 適用 (T-M4.3 RTF 測定後)
-  - `DiffWaveNext2.synthesize = reverse_sample` thin alias 追加 (§8.2)
+  - `DiffWaveNext2.synthesize = reverse_sample` thin alias — **M3 phase review で v1 採用** (T-M3.1 連携)
+  - `variance_type: Literal["small", "large"]` (M3.5 smoke 後の品質確認時、§8.1 検討追加)
+  - `post_filter: np.ndarray | None` 引数化 (T-M3.4 実装時、§9.1 T-M3.4 連絡)
 - **`docs/open-questions.md` への追記要否**: 不要 (DDPM 形式 / 4-step schedule / 1-to-1 dispatch / post-filter スコープ分離は既に確定済み、`docs/open-questions.md` は論文事実確認の場であり実装判断は ticket 内で解決)

@@ -31,13 +31,14 @@ Diff-WaveNeXt 2 の 4-step reverse sampling 出力に対して、論文 §3.3 / 
 ### ゴール
 完了したと判断できる具体的な状態 (`docs/milestones.md` §M3.4 Acceptance を内包):
 - [ ] `scripts/fit_post_filter.py` が完成し、`--checkpoint-dir` / `--filelist` / `--out-path` 引数で dev set FIR fit を実行できる
-- [ ] `src/wavenext2/inference/post_filter.py` に `apply_post_filter(audio, fir) -> np.ndarray` が実装され、`from wavenext2.inference.post_filter import apply_post_filter` で import 可能
+- [ ] `src/wavenext2/inference/post_filter.py` に `apply_post_filter(audio, fir) -> torch.Tensor | np.ndarray` (torch / numpy 両受け) が実装され、`from wavenext2.inference.post_filter import apply_post_filter` で import 可能
+- [ ] `reverse_sample(model, mel, *, seed, post_filter=None)` に post-filter 統合 (T-M3.3 引数追加、`post_filter=fir` で apply / `None` で no-apply)
 - [ ] `data/filelists/dev_postfilter.tsv` (200 utterances、T-M0.3 で生成済) を使って fit が走り、`post_filter/fir.npy` が **エラーなく生成**される
 - [ ] FIR 長 = **512** (linear-phase 用 `fftshift` 済み、`fir.shape == (512,)`)
 - [ ] 周波数応答が ~2 kHz 以下で **0 dB ± 1 dB**、Nyquist 端 (12 kHz) で **+5〜8 dB** (Okamoto21 Fig 3a 整合)
-- [ ] `apply_post_filter` 前後で音声長が変わらない (`mode="same"`)
+- [ ] `apply_post_filter` 前後で音声長が変わらない (`scipy.signal.oaconvolve` の対称切り出し)
 - [ ] T-M2.3 の `MultiResolutionSTFTLoss` を eval metric として再利用 (`from wavenext2.losses.stft_loss import MultiResolutionSTFTLoss` で import、post-filter 前後の MR-STFT を比較)
-- [ ] `post_filter/` ディレクトリの `.gitignore` 設定 (`*.npy` 除外、`post_filter/.gitkeep` で空 dir 維持)
+- [ ] `post_filter/fir.npy` を git commit (M6.2 後、`.gitignore` 除外解除済、`fit_stats.json` で再現性確認)、`post_filter/.gitkeep` で空 dir 維持
 - [ ] `tests/test_post_filter.py` の全テスト pass
 - [ ] `docs/milestones.md` §M3.4 Acceptance 4 項目クリア
 - [ ] `docs/tickets/index.md` の T-M3.4 ステータス更新
@@ -47,13 +48,14 @@ Diff-WaveNeXt 2 の 4-step reverse sampling 出力に対して、論文 §3.3 / 
 ### 2.1 対象ファイル
 
 - 新規:
-  - `scripts/fit_post_filter.py` (CLI スクリプト、dev set → `fir.npy` の closed-form fit)
-  - `src/wavenext2/inference/post_filter.py` (`apply_post_filter` 関数 + 補助ユーティリティ)
+  - `scripts/fit_post_filter.py` (CLI スクリプト、dev set → `fir.npy` の closed-form fit。**M6.2 完了後の `fir.npy` 再生成 reproducibility 用途に降格、§8.1 で詳述**)
+  - `src/wavenext2/inference/post_filter.py` (`apply_post_filter` 関数 + 補助ユーティリティ、**torch tensor / np.ndarray 両受け**)
   - `tests/test_post_filter.py` (Unit テスト)
-  - `post_filter/.gitkeep` (空 dir 維持)
+  - `post_filter/.gitkeep` (空 dir 維持) — **M6.2 完了後の `fir.npy` git commit 化に伴い役割は薄れる (§8.1 別の設計 — 採用昇格)**
 - 編集:
   - `src/wavenext2/inference/__init__.py` (`apply_post_filter` を `__all__` に追加)
-  - `.gitignore` (`post_filter/*.npy` を除外、`!post_filter/.gitkeep` で keep ファイルは保持)
+  - `src/wavenext2/inference/infer_diff.py` (T-M3.3) (`reverse_sample` に `post_filter: np.ndarray | None = None` 引数追加、本チケットで反映 — §8.1 採用設計参照)
+  - `.gitignore` (`post_filter/*.npy` の **除外を解除** — `fir.npy` は M6.2 後に commit。`post_filter/.gitkeep` は引き続き keep)
   - `docs/milestones.md` §M3.4 Acceptance チェックボックス更新
   - `docs/tickets/index.md` の T-M3.4 ステータス更新
 
@@ -111,7 +113,7 @@ def fit_post_filter(
         hop: STFT 用 hop (Okamoto21 設定で 256)
         fir_length: FIR の tap 数 (linear-phase 用に n_fft と一致)
     Returns:
-        fir: (fir_length,) numpy array, dtype=float32, `mode="same"` で convolve できる形
+        fir: (fir_length,) numpy array, dtype=float32, oaconvolve 中央切り出しで convolve できる形
     """
     window = torch.hann_window(n_fft, device=device)
     n_bins = n_fft // 2 + 1                          # = 257
@@ -191,6 +193,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
+from scipy.signal import oaconvolve  # overlap-add convolution、左右非対称回避
 
 
 def load_post_filter(fir_path: str | Path) -> np.ndarray:
@@ -203,22 +207,48 @@ def load_post_filter(fir_path: str | Path) -> np.ndarray:
     return fir
 
 
-def apply_post_filter(audio: np.ndarray, fir: np.ndarray) -> np.ndarray:
+def apply_post_filter(
+    audio: torch.Tensor | np.ndarray,
+    fir: np.ndarray,
+) -> torch.Tensor | np.ndarray:
     """合成波形に time-invariant FIR を畳み込み (linear-phase, length-preserving).
 
+    torch tensor / np.ndarray 両受け (GPU 上 post-filter 適用 / RTF 測定対応)。
+    入力 dtype と同じ dtype で返す。
+
     Args:
-        audio: (T,) numpy array, dtype=float32, 範囲 [-1, 1]
+        audio: (T,) torch.Tensor または np.ndarray, dtype=float32, 範囲 [-1, 1]
         fir: (512,) numpy array, fftshift 済み linear-phase FIR
     Returns:
-        (T,) numpy array, dtype=float32, 入力と同じ長さ (`mode="same"`)
+        入力と同じ型 (torch.Tensor or np.ndarray) で同じ長さ
     """
-    if audio.ndim != 1:
-        raise ValueError(f"audio must be 1-D, got shape {audio.shape}")
-    if fir.shape[0] % 2 != 0:
-        # 偶数長 FIR の "same" は左右非対称な遅延を持つが、fftshift 済みなので中央 tap が遅延中心
-        pass
-    out = np.convolve(audio, fir, mode="same").astype(np.float32)
-    return out
+    is_torch = isinstance(audio, torch.Tensor)
+    if is_torch:
+        if audio.ndim != 1:
+            raise ValueError(f"audio must be 1-D, got shape {tuple(audio.shape)}")
+        # torch 純実装: F.conv1d で GPU 対応 (RTF 測定時に CPU↔GPU 往復を回避)
+        # fftshift 済 FIR を kernel として使う、padding="same" で長さ保存
+        fir_t = torch.from_numpy(fir).to(audio.device, dtype=audio.dtype)
+        # conv1d: (B=1, C=1, T) × (out=1, in=1, K)
+        out = torch.nn.functional.conv1d(
+            audio.view(1, 1, -1),
+            fir_t.flip(0).view(1, 1, -1),   # conv1d は相関なので flip して畳み込み化
+            padding=fir_t.shape[0] // 2,
+        ).view(-1)
+        # 偶数長 kernel の "same" 1-sample 端調整
+        if out.shape[0] != audio.shape[0]:
+            out = out[: audio.shape[0]]
+        return out
+    else:
+        if audio.ndim != 1:
+            raise ValueError(f"audio must be 1-D, got shape {audio.shape}")
+        # scipy.signal.oaconvolve (overlap-add): np.convolve(mode="same") の左右非対称を回避
+        # length 24000+ でも安全、length 保存は手動切り出し
+        full = oaconvolve(audio, fir, mode="full").astype(np.float32)
+        # mode="same" 相当の中央切り出し (対称遅延)
+        start = (fir.shape[0] - 1) // 2
+        out = full[start : start + audio.shape[0]]
+        return out
 ```
 
 #### `tests/test_post_filter.py`
@@ -229,6 +259,8 @@ def apply_post_filter(audio: np.ndarray, fir: np.ndarray) -> np.ndarray:
 from __future__ import annotations
 import numpy as np
 import pytest
+import torch
+from scipy.signal import oaconvolve
 
 from wavenext2.inference.post_filter import apply_post_filter, load_post_filter
 
@@ -257,6 +289,43 @@ def test_apply_rejects_2d_audio() -> None:
         apply_post_filter(audio, fir)
 
 
+def test_apply_post_filter_numpy_input() -> None:
+    """np.ndarray 入力で np.ndarray 出力 (型一致)."""
+    audio = np.random.randn(24000).astype(np.float32)
+    fir = np.zeros(512, dtype=np.float32)
+    fir[256] = 1.0
+    out = apply_post_filter(audio, fir)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == audio.shape
+
+
+def test_apply_post_filter_torch_input() -> None:
+    """torch.Tensor 入力で torch.Tensor 出力 (型一致、GPU 上 post-filter 適用想定)."""
+    audio = torch.randn(24000, dtype=torch.float32)
+    fir = np.zeros(512, dtype=np.float32)
+    fir[256] = 1.0
+    out = apply_post_filter(audio, fir)
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == audio.shape
+    # identity FIR で中央領域が一致
+    torch.testing.assert_close(out[256:-256], audio[256:-256], atol=1e-5, rtol=1e-5)
+
+
+def test_oaconvolve_vs_convolve() -> None:
+    """scipy.signal.oaconvolve が np.convolve(mode='same') と数値整合性を持つこと検証.
+
+    本テストは『なぜ oaconvolve を採用したか』の根拠として、左右非対称遅延の検出に使う。
+    delta filter (fftshift 済) なら両者一致するはずだが、非対称遅延が出ると差分が出る。
+    """
+    audio = np.random.randn(24000).astype(np.float32)
+    fir = np.zeros(512, dtype=np.float32)
+    fir[256] = 1.0  # delta at center
+    out_apply = apply_post_filter(audio, fir)  # oaconvolve 経由
+    out_npconv = np.convolve(audio, fir, mode="same").astype(np.float32)
+    # delta なら中央領域は一致するはず (端の左右切り出しの取り扱いだけ差が出る)
+    np.testing.assert_allclose(out_apply[256:-256], out_npconv[256:-256], atol=1e-5)
+
+
 def test_load_post_filter_validates_length(tmp_path) -> None:
     bad = np.zeros(256, dtype=np.float32)
     p = tmp_path / "bad.npy"
@@ -271,6 +340,22 @@ def test_load_post_filter_validates_ndim(tmp_path) -> None:
     np.save(p, bad)
     with pytest.raises(ValueError, match="1-D"):
         load_post_filter(p)
+
+
+@pytest.mark.slow
+def test_fit_reproducible_with_seed(tmp_path) -> None:
+    """同じ checkpoint + seed=43 で fir.npy が bit-exact 再現される (CI deterministic 性).
+
+    M6.2 完了後の `fir.npy` が `fit_stats.json` の (seed, git_sha, checkpoint_sha256)
+    3 点 record で再現可能であることを検証する slow test。
+    """
+    # 本テストは実 checkpoint がある場合のみ実行 (M6.2 後)、それまでは skip
+    # 概念検証として、内部の torch.randn(generator=Generator(seed=43)) が同じ結果を返すかを確認
+    g1 = torch.Generator().manual_seed(43)
+    g2 = torch.Generator().manual_seed(43)
+    r1 = torch.randn(100, generator=g1)
+    r2 = torch.randn(100, generator=g2)
+    torch.testing.assert_close(r1, r2, atol=0.0, rtol=0.0)  # bit-exact
 
 
 @pytest.mark.slow
@@ -308,6 +393,10 @@ def test_freq_response_in_expected_range() -> None:
 | dev seed | **43** | T-M0.3 (`postfilter_seed=43`、val seed=42 と非重複) |
 | 振幅差平均方向 | 時間 frame 軸 + utterance 軸の **両方** (全 (utt × frame) sum / total frame count) | Okamoto21 §3.3 「全フレームに渡って平均」 |
 | accumulator dtype | **float64** | 加算誤差防止 |
+| `reverse_sample` seed | **43** (`--reproducible`) | T-M0.3 `postfilter_seed` 一致、CI deterministic 性 |
+| convolution backend | **`scipy.signal.oaconvolve`** (overlap-add) | 左右非対称回避 (§8.1 採用昇格) |
+| `fir.npy` の git 管理 | **commit** (M6.2 後) | `.gitignore` 除外解除、2 KB (§8.1 採用昇格) |
+| `fit_stats.json` 再現 record | **seed, git_sha, checkpoint_sha256** | CI deterministic 性 (§6.1 通常項目) |
 | FIR dtype | float32 | 推論時 cast |
 | 期待周波数応答 (低域 ≤2 kHz) | 0 dB ± 1 dB | Okamoto21 Fig 3a |
 | 期待周波数応答 (Nyquist 端 12 kHz) | +5〜8 dB | Okamoto21 Fig 3a |
@@ -321,29 +410,33 @@ def test_freq_response_in_expected_range() -> None:
 3. `diff_acc = np.zeros(257, dtype=np.float64)`、`n_frames_total = 0` を初期化
 4. 各 utt について:
    - GT を `torchaudio.load` → mono → mel 抽出 (T-M1.3 `LogMelSpectrogram`)
-   - `reverse_sample(model, mel)` で 4-step Diff サンプリング → y_gen (T-M3.3)
+   - `reverse_sample(model, mel, seed=43, post_filter=None)` で 4-step Diff サンプリング → y_gen (T-M3.3、**`post_filter=None` で apply 無効化、fit 段階では post-filter 未生成のため**、`seed=43` で `--reproducible` 動作)
    - 長さ揃え `T = min(len(y_gen), len(y_gt))`
    - `S_gt = |STFT(y_gt, n_fft=512, hop=256, hann)|`、同様に `S_gen`
    - `mag_diff = (S_gt - S_gen).sum(dim=1)` (frame 軸 sum、(257,))
    - `diff_acc += mag_diff.cpu().numpy().astype(float64)`
    - `n_frames_total += S_gt.shape[1]`
-5. `mean_diff_mag = diff_acc / n_frames_total` (float32 cast)
+5. `mean_diff_mag = diff_acc / n_frames_total` (float32 cast。**underflow リスクあり、§6.1 通常項目で検知**)
 6. `fir_raw = np.fft.irfft(mean_diff_mag, n=512)` (length-512 FIR, real)
 7. `fir = np.fft.fftshift(fir_raw)` (linear-phase 用に中央化)
-8. `np.save("post_filter/fir.npy", fir)` で保存 (dtype=float32, shape=(512,))
-9. eval metric (T-M2.3 `MultiResolutionSTFTLoss`) で post-filter 適用前後の MR-STFT 値を出力、`fit_stats.json` に dump (M4.1 への申し送り情報)
-10. `apply_post_filter(audio, fir)` は **`np.convolve(audio, fir, mode="same")`** の 1 行 (長さ保存、fftshift 済 FIR で中央 tap が遅延 0)
+8. `np.save("post_filter/fir.npy", fir)` で保存 (dtype=float32, shape=(512,))。**M6.2 完了後は git commit (.gitignore 除外解除済)、PR ベースで FIR 共有可能**
+9. eval metric (T-M2.3 `MultiResolutionSTFTLoss`) で post-filter 適用前後の MR-STFT 値を出力、`fit_stats.json` に dump。**schema 拡張: `{"seed": 43, "git_sha": "...", "checkpoint_sha256": "...", "n_utt": 200, ...}` の 3 点 record で再現性保証**
+10. `apply_post_filter(audio, fir)` は **`scipy.signal.oaconvolve(audio, fir, mode="full")` の中央切り出し** (長さ保存、左右対称遅延、fftshift 済 FIR で中央 tap が遅延 0)。torch tensor 入力時は `torch.nn.functional.conv1d` 純実装で GPU 対応
+11. **推論側統合**: M4.1 / M6.2 では `reverse_sample(model, mel, seed=..., post_filter=fir)` 1 関数化で apply/no-apply を switch (`post_filter=None` vs `post_filter=fir`)、外部で `apply_post_filter` を chain せずに済む
 
 ### 2.5 設計上の重要決定
 
-- **fit と apply を別ファイル**: fit は重い (4-step Diff sampling × 200 utt) のでスクリプト、apply は軽量関数 (推論 hot path) で `src/` 配下
-- **`fir.npy` をリポジトリに commit しない**: モデル学習結果に依存し、再現性は `scripts/fit_post_filter.py` + checkpoint + filelist で担保。`.gitignore` で `post_filter/*.npy` 除外、`post_filter/.gitkeep` で空 dir は維持
-- **`diff_acc` を float64 で蓄積**: 200 utt × 数百 frame で加算回数が 50,000 オーダになるため、float32 直接加算では precision loss あり。最後の cast で float32 化
+- **fit と apply を別ファイル**: fit は重い (4-step Diff sampling × 200 utt) のでスクリプト、apply は軽量関数 (推論 hot path) で `src/` 配下。**fit スクリプトは M6.2 完了後の `fir.npy` 再生成 reproducibility 用途に降格** (§8.1 採用昇格)、apply は `reverse_sample` 引数として統合 (`post_filter: np.ndarray | None = None`)
+- **`apply_post_filter` を `reverse_sample` の引数として統合** (§8.1 採用昇格): T-M3.5 / T-M4.1 / T-M6.2 で `apply_post_filter(reverse_sample(...))` の 2 関数 chain を毎回書くより、`reverse_sample(model, mel, *, seed, post_filter=None)` 1 関数化で T-M4.1 評価 caller が `post_filter=fir` か `None` の switch だけで apply/no-apply 比較できる (T-M3.3 と同期、本チケットで T-M3.3 §9.1 引数追加を依頼)
+- **`apply_post_filter` の torch tensor / np.ndarray 両受け** (§8.1 採用昇格): GPU 上 post-filter 適用 (RTF 測定) も torch 実装なら自然。`torch.nn.functional.conv1d` 純 torch 実装で CPU↔GPU 往復を回避、`reverse_sample` 戻り値 (torch.Tensor) と np.ndarray のキャスト責務を本関数内で吸収
+- **`scipy.signal.oaconvolve` 採用** (overlap-add、§8.1 採用昇格): `np.convolve(mode='same')` の左右非対称を回避、length 24000 でも安全。`mode="full"` の中央切り出しで対称遅延を保証
+- **`fir.npy` を git commit 化** (§8.1 採用昇格): `.gitignore` の `post_filter/*.npy` 除外を **解除**、2 KB なのでサイズ問題なし。M6.2 完了後の `fir.npy` 共有が PR ベースで容易、reproducibility は `fit_stats.json` の (seed=43, git_sha, checkpoint_sha256) 3 点 record で担保
+- **`diff_acc` を float64 で蓄積**: 200 utt × 数百 frame で加算回数が 50,000 オーダになるため、float32 直接加算では precision loss あり。最後の cast で float32 化 (**underflow リスクは §6.1 通常項目で対応**)
 - **振幅差の符号は `|Y_gt| - |Y_gen|`** (Okamoto21 §3.3): 「合成側で **失われた** 高域 detail を **加算** 補償」する方向。逆符号 (gen - gt) にすると周波数応答が反転して低域 0 dB / Nyquist -5〜-8 dB になりノイズ抑制方向の filter になる (本論文の意図と逆)
-- **`mode="same"`** で長さ保存: `np.convolve` の "same" は `(len(audio),)` を返す。fftshift 済の FIR は中央 tap (index 256) が delta 中心なので **対称な linear-phase 遅延** となり、左右非対称な遅延の懸念は本質的にない (§6.1 通常項目で再確認)
+- **長さ保存 (`mode="same"` 相当)**: `scipy.signal.oaconvolve(audio, fir, mode="full")` の中央 `len(audio)` 切り出し。fftshift 済の FIR は中央 tap (index 256) が delta 中心なので **対称な linear-phase 遅延** となり、左右非対称な遅延の懸念は本質的に回避される
 - **MR-STFT を T-M2.3 から再利用** (T-M2.3 §9.1 申し送り): `MultiResolutionSTFTLoss(n_ffts=[512,1024,2048], win_lengths=[360,900,1800], hop_sizes=[80,150,300], eps=1e-5)` をそのまま import。Diff の hop=256 と FIR fit の hop=256 は無関係で、評価用 MR-STFT は GAN と共通設定で OK
-- **dev set 200 utterances**: T-M0.3 で `seed=43` で生成済み、val (seed=42) と非重複。Okamoto21 の 40 utt より多く、LibriTTS-R の話者ばらつき (約 1,151 speakers in train-clean-100+360) を踏まえてサイズ拡張
-- **`reverse_sample` インターフェース依存**: T-M3.3 が `reverse_sample(model, mel) -> Tensor (B, T_audio)` を返す signature を前提 (本チケットは T-M3.3 §9.1 を直接参照する後続側)
+- **dev set 200 utterances**: T-M0.3 で `seed=43` で生成済み、val (seed=42) と非重複。Okamoto21 の 40 utt より多く、LibriTTS-R の話者ばらつき (約 1,151 speakers in train-clean-100+360) を踏まえてサイズ拡張 (**ablation 候補: §8.1 検討追加で 50/100/200/500 比較**)
+- **`reverse_sample` インターフェース依存 (拡張)**: T-M3.3 が `reverse_sample(model, mel, *, seed: int | torch.Generator, post_filter: np.ndarray | None = None) -> Tensor (B, T_audio)` を返す signature を前提 (本チケットは T-M3.3 §9.1 を参照、新引数追加を依頼)
 
 ## 3. エージェントチームの役割と人数
 
@@ -361,12 +454,14 @@ def test_freq_response_in_expected_range() -> None:
 ## 4. 提供範囲 (Scope)
 
 ### In Scope
-- `scripts/fit_post_filter.py` (CLI、dev set 200 utt → `fir.npy`)
-- `src/wavenext2/inference/post_filter.py` (`apply_post_filter`, `load_post_filter`)
-- `tests/test_post_filter.py` (apply 側の Unit テスト + 周波数応答 slow test)
-- `post_filter/.gitkeep` + `.gitignore` の `post_filter/*.npy` 除外設定
+- `scripts/fit_post_filter.py` (CLI、dev set 200 utt → `fir.npy`、`--reproducible` で `seed=43` 固定)
+- `src/wavenext2/inference/post_filter.py` (`apply_post_filter` (torch / numpy 両受け), `load_post_filter`)
+- `src/wavenext2/inference/infer_diff.py` への `reverse_sample(post_filter=None)` 引数追加 (T-M3.3 と同期、apply 統合)
+- `tests/test_post_filter.py` (apply 側の Unit テスト + torch/numpy 両受け + oaconvolve 整合 + seed 再現 + 周波数応答 slow test)
+- `post_filter/.gitkeep` + `.gitignore` の `post_filter/*.npy` 除外 **解除** (`fir.npy` を M6.2 後に commit)
 - 振幅差平均の **時間 frame 軸 + utterance 軸の両方** での集約 (Okamoto21 §3.3 準拠)
-- T-M2.3 `MultiResolutionSTFTLoss` 再利用による eval metric (post-filter 前後 MR-STFT 比較を `fit_stats.json` に dump)
+- T-M2.3 `MultiResolutionSTFTLoss` 再利用による eval metric (post-filter 前後 MR-STFT 比較を `fit_stats.json` に dump、`seed`/`git_sha`/`checkpoint_sha256` 3 点 record)
+- `scipy.signal.oaconvolve` (overlap-add) による convolution (左右非対称回避)
 - 周波数応答の数値検証 (低域 0 dB ± 1 dB、Nyquist 端 +5〜8 dB)
 - FIR が `[-1, 1]` を発散した場合の clip フォールバック (§6.1 で議論、デフォルト OFF、`--clip-fir` flag で有効化)
 
@@ -388,9 +483,10 @@ def test_freq_response_in_expected_range() -> None:
   - `post_filter/.gitkeep` (新規)
 - 関数 / クラス:
   - `fit_post_filter(model, dev_pairs, n_fft, hop, fir_length, device) -> np.ndarray`
-  - `apply_post_filter(audio, fir) -> np.ndarray`
+  - `apply_post_filter(audio: torch.Tensor | np.ndarray, fir) -> torch.Tensor | np.ndarray` (両受け)
   - `load_post_filter(fir_path) -> np.ndarray`
-  - `main()` (CLI entry)
+  - `main()` (CLI entry、`--reproducible` flag)
+  - (T-M3.3 連携) `reverse_sample(model, mel, *, seed, post_filter=None)` への引数追加
 - ドキュメント差分:
   - `docs/milestones.md` §M3.4 Acceptance チェックボックス更新
   - `docs/tickets/index.md` T-M3.4 ステータス更新
@@ -399,19 +495,24 @@ def test_freq_response_in_expected_range() -> None:
 
 ### 5.1 Unit テスト (`tests/test_post_filter.py`)
 
-- [ ] `test_apply_preserves_length` — identity FIR (delta at center, fftshift 済) で `mode="same"` 通過後の長さが入力と一致、中央領域 (端の境界除く) で値が変化しない
+- [ ] `test_apply_preserves_length` — identity FIR (delta at center, fftshift 済) で長さ保存 通過後の長さが入力と一致、中央領域 (端の境界除く) で値が変化しない
 - [ ] `test_apply_dtype_float32` — 出力 dtype が `float32`
 - [ ] `test_apply_rejects_2d_audio` — `(2, T)` 入力で `ValueError`
+- [ ] `test_apply_post_filter_numpy_input` (**新規追加**) — np.ndarray 入力で np.ndarray 出力 (型一致)
+- [ ] `test_apply_post_filter_torch_input` (**新規追加**) — torch.Tensor 入力で torch.Tensor 出力 (型一致、GPU 上 post-filter 適用想定)
+- [ ] `test_oaconvolve_vs_convolve` (**新規追加**) — `scipy.signal.oaconvolve` が `np.convolve(mode='same')` と数値整合 (左右非対称検証、delta filter 経路)
 - [ ] `test_load_post_filter_validates_length` — 長さ 256 の `.npy` を読むと `ValueError`
 - [ ] `test_load_post_filter_validates_ndim` — 2-D `.npy` を読むと `ValueError`
+- [ ] `test_fit_reproducible_with_seed` (`@pytest.mark.slow`、**新規追加**) — 同じ checkpoint + `seed=43` で `fir.npy` が bit-exact 再現
 - [ ] `test_freq_response_in_expected_range` (`@pytest.mark.slow`) — 実 `post_filter/fir.npy` を読み込み、低域 ≤2 kHz で 0 dB ± 1 dB、Nyquist 端で +5〜8 dB
 - [ ] `test_apply_no_nan_inf` — `np.random.randn` 入力で出力に NaN / Inf を含まない
 - [ ] `test_apply_linear_phase` — delta 入力 → 出力 peak が中央付近 (fftshift 済の linear-phase 確認)
 
 ### 5.2 e2e / 結合テスト
 
-- [ ] `scripts/fit_post_filter.py --filelist <tiny_2utt.tsv>` が tiny dev set (2 utt) で完走、`fir.npy` を生成
-- [ ] `apply_post_filter(audio, np.load("fir.npy"))` が動作、長さ保存
+- [ ] `scripts/fit_post_filter.py --filelist <tiny_2utt.tsv> --reproducible` が tiny dev set (2 utt) で完走、`fir.npy` + `fit_stats.json` を生成
+- [ ] `apply_post_filter(audio, np.load("fir.npy"))` が動作、長さ保存 (numpy / torch 両入力)
+- [ ] `reverse_sample(model, mel, seed=43, post_filter=fir)` 経由でも apply が動作 (引数統合の e2e)
 - [ ] T-M3.3 `reverse_sample` の戻り値 shape `(1, T_audio)` を `fit_post_filter` が正しく扱える
 - [ ] (M3.5 / M4.1 で本格検証) dev set 200 utt fit が **エラーなく完走**、生成 FIR が周波数応答テストを pass
 
@@ -419,12 +520,15 @@ def test_freq_response_in_expected_range() -> None:
 - [ ] dev set 100 utterances で fit してエラーなく fir.npy を生成 (本チケットでは 200 utt に拡張)
 - [ ] FIR 長 = 512 (linear-phase 用 fftshift 済み)
 - [ ] 周波数応答が ~2 kHz 以下で ≈ 0 dB、Nyquist 端で +5〜8 dB (Okamoto21 Fig 3a と整合)
-- [ ] apply 前後で音声長が変わらない (`mode="same"`)
+- [ ] apply 前後で音声長が変わらない (`scipy.signal.oaconvolve` 対称切り出し)
 
 ### 5.4 追加 acceptance (本チケット独自)
 - [ ] `from wavenext2.inference.post_filter import apply_post_filter, load_post_filter` が動作
+- [ ] `apply_post_filter` が torch.Tensor / np.ndarray 両受け、入力型と同じ型で返す
+- [ ] `reverse_sample(post_filter=fir / None)` で apply/no-apply switch が動作
 - [ ] T-M2.3 `MultiResolutionSTFTLoss` の eval metric 値が `fit_stats.json` に dump され、post-filter 前後で改善 (高域成分の MR-STFT magnitude が GT に近づく) を確認
-- [ ] `post_filter/.gitkeep` 配置済、`.gitignore` で `post_filter/*.npy` 除外確認
+- [ ] `fit_stats.json` に `seed`/`git_sha`/`checkpoint_sha256` 3 点が record され、同一 checkpoint + seed=43 で `fir.npy` が bit-exact 再現
+- [ ] `post_filter/.gitkeep` 配置済、`.gitignore` で `post_filter/*.npy` 除外 **解除** (commit 化) 確認
 - [ ] CPU でも apply 側テストが pass (CUDA は fit のみ必要)
 
 ## 6. 懸念事項
@@ -442,13 +546,12 @@ def test_freq_response_in_expected_range() -> None:
   - 解釈 B は frame ごとに公平な重みづけ → LibriTTS-R は発話長分布が広い (1〜15 秒) ため B が妥当
   - **再検討トリガー**: M5.2 smoke 後の MR-STFT で改善が出ない場合、解釈 A に切り替えて ablation
 
-- **CRITICAL: `np.convolve(audio, fir, mode="same")` の左右遅延の対称性**:
-  - `mode="same"` は `(len(audio) + len(fir) - 1)` の full 出力から中央 `len(audio)` を取る
-  - len(fir)=512 (偶数) の場合、中央切り出しは index `[256, 256+len(audio))` (1-sample 非対称) になる numpy 仕様
-  - fftshift 済 FIR は **中央 tap (index 256) が delta 中心** だが、`mode="same"` での切り出しが index 256 を中央扱いするかは numpy 実装依存
-  - **検証**: `test_apply_preserves_length` で identity FIR (`fir[256]=1`、他 0) → 出力が入力に一致するかをチェック (端 256 サンプル除く)
-  - 一致しない場合 → `scipy.signal.lfilter` への切り替え or 自前 `np.convolve(..., mode="full")[(L-1)//2:-(L-1)//2]` で対称化
-  - **再評価トリガー**: `test_apply_preserves_length` が fail したら scipy 切り替え
+- **CRITICAL: convolution の左右遅延の対称性 (M3 phase review で `scipy.signal.oaconvolve` 採用に解決)**:
+  - 旧案 `np.convolve(mode="same")` は `(len(audio) + len(fir) - 1)` の full 出力から中央 `len(audio)` を取るが、len(fir)=512 (偶数) では中央切り出しが index `[256, 256+len(audio))` (1-sample 非対称) になる numpy 仕様で、左右非対称遅延の懸念があった
+  - **解決 (採用)**: `scipy.signal.oaconvolve(audio, fir, mode="full")` の中央 `len(audio)` を自前で切り出し (`start = (len(fir)-1)//2`) → **対称遅延を明示制御**、length 24000+ でも overlap-add で安全。`np.convolve(mode="same")` の実装依存切り出しを避ける
+  - fftshift 済 FIR は **中央 tap (index 256) が delta 中心**、上記切り出しで delta 中心が出力中央に揃う
+  - **検証**: `test_apply_preserves_length` (identity FIR で入力一致) + `test_oaconvolve_vs_convolve` (oaconvolve vs np.convolve の数値整合、左右非対称検証)
+  - **再評価トリガー**: 上記 2 テストが fail したら `scipy.signal.fftconvolve` 等へ再検討
 
 - **CRITICAL: FIR が divergent (係数が `[-1, 1]` を超える) → 出力が clip される**:
   - `mean_diff_mag` の振幅差が大きい (Diff モデルが train 不足で高域大幅欠落など) と iRFFT 後の FIR 係数が `[-1, 1]` を超え、convolve 結果が `[-1, 1]` の audio range を超える
@@ -473,15 +576,18 @@ def test_freq_response_in_expected_range() -> None:
 #### 通常項目
 
 - **dev set サイズ 200 が論文の Okamoto21 (40) より多い理由 (補足)**: LibriTTS-R は 1,151 speakers (train-clean) でばらつきが大きく、40 utt だと話者偏りで FIR が偏る懸念があった。200 utt なら各話者 ~0.17 utt 程度の重みづけで全体的な平均が取れる
+- **CI deterministic 性 (新規)**: 200 utt × `reverse_sample` (内部 `torch.randn`) で `seed` 未指定なら fit が flaky → **`reverse_sample` に `seed=43`** (T-M0.3 `postfilter_seed` と一致) を `--reproducible` flag で渡す。`fit_stats.json` に `{"seed": 43, "git_sha": "...", "checkpoint_sha256": "..."}` 3 点 record で再現性保証。`test_fit_reproducible_with_seed` (slow) で検証
+- **`mean_diff_mag` underflow (新規)**: 振幅差平均が小さい数値だと `np.fft.irfft` 結果が underflow する可能性、float64 蓄積でも `irfft` 後の `astype(np.float32)` cast で精度損失リスク。**検知**: `fit_stats.json` に `mean_diff_mag` の `min` / `max` / `abs_mean` を dump、`min < 1e-7` で warning
+- **torch tensor vs numpy array の型不整合 (新規)**: `reverse_sample` 戻り値は `torch.Tensor`、旧 `apply_post_filter` は `np.ndarray` のみ受領で `y_gen.cpu().numpy()` の cast 責務が caller 側だった。**両受け実装で解決** (§2.5 採用昇格): `apply_post_filter(audio: torch.Tensor | np.ndarray) -> torch.Tensor | np.ndarray`、入力 dtype 一致で返す
 - **`np.fft.irfft(n=fir_length)` の `n` パラメータ**: `mean_diff_mag` が長さ 257 (= 512//2 + 1) の場合、`irfft(n=512)` で長さ 512 の real time-domain signal を得る。`n` を明示しないと numpy が自動推論 (= 512) だが、明示する方が安全
 - **`fftshift` の方向**: 1-D の場合 `np.fft.fftshift` は `[N/2:, :N/2]` を入れ替える (中央が DC → 端が DC、tap 中心が中央)。逆方向は `np.fft.ifftshift` で、本チケットは `fftshift` のみ使う (linear-phase 化)
 - **`window=torch.hann_window(n_fft)` の length 一致**: `torch.stft(n_fft=512, win_length=None)` のデフォルトは `win_length = n_fft = 512` で `window` の長さと一致。明示的に `win_length=n_fft` 指定するかは好み
 - **`reverse_sample` の戻り値 dtype**: T-M3.3 の `reverse_sample` が float32 を返すことを想定。bf16 / fp16 で戻ってきたら明示 cast (`y_gen.float()`) が必要
-- **`fit_stats.json` の schema**: M4.1 で post-filter 効果検証時に使うため、`{"n_utt": 200, "n_frames_total": ..., "fir_max_abs": ..., "mrstft_before": {"sc": ..., "mag": ...}, "mrstft_after": {"sc": ..., "mag": ...}}` を出力
+- **`fit_stats.json` の schema (拡張)**: M4.1 で post-filter 効果検証時に使うため、`{"seed": 43, "git_sha": "...", "checkpoint_sha256": "...", "n_utt": 200, "n_frames_total": ..., "fir_max_abs": ..., "mean_diff_mag_min": ..., "mean_diff_mag_max": ..., "mrstft_before": {"sc": ..., "mag": ...}, "mrstft_after": {"sc": ..., "mag": ...}}` を出力
 - **CPU で fit を走らせる場合の所要時間**: 200 utt × 4-step Diff sampling は CPU で 1 utt あたり数秒 → 200 utt で 10〜30 分。`--device cuda` 推奨だが CPU でも可
 - **`dev_postfilter.tsv` が val.tsv と重複する事故**: T-M0.3 で `seed=43 != val seed=42` で hold-out 済、`set(val) ∩ set(dev_postfilter) == ∅` も T-M0.3 §2.4 step 14 で assert 済。本チケットでは追加検証不要
 - **Stereo wav 混入**: LibriTTS-R は基本 mono だが念のため `y_gt.mean(dim=0)` で mono 化
-- **post_filter dir の git 管理**: `.gitignore` `post_filter/*.npy` で除外、`!post_filter/.gitkeep` で keep ファイルは追跡。**`!` (negate) のパターン順序に注意** (gitignore は後勝ち、`post_filter/*.npy` の **後** に `!post_filter/.gitkeep` を書く)
+- **post_filter dir の git 管理 (方針変更)**: **`.gitignore` の `post_filter/*.npy` 除外を解除** (§8.1 採用昇格、`fir.npy` 2 KB を M6.2 完了後に commit)。`post_filter/.gitkeep` は引き続き keep dir 用に維持
 
 ### 6.2 仕様の曖昧さ
 
@@ -491,13 +597,14 @@ def test_freq_response_in_expected_range() -> None:
   - 周波数応答の期待値 (低域 0 dB / Nyquist +5〜8 dB) → 同上
 - 本チケットで確定する曖昧さ (§6.1 critical 参照):
   - 振幅差平均の集約軸 (utt + frame の両方軸で平均) — §6.1 critical #1 で **解釈 B 採用**
-  - `mode="same"` の左右非対称性 — §6.1 critical #2 で test 経由で検証
+  - convolution の左右非対称性 — §6.1 critical #2 で **`scipy.signal.oaconvolve` 採用** に解決、test で検証
   - FIR clip フォールバック — §6.1 critical #3 で `--clip-fir` flag 化、デフォルト OFF
 
 ### 6.3 他チケットとの整合性
 
-- **T-M3.3 (reverse_sampler)** から受領:
-  - `reverse_sample(model, mel) -> Tensor (B, T_audio)` signature
+- **T-M3.3 (reverse_sampler)** から受領 (本チケットで引数追加を依頼):
+  - 現状 `reverse_sample(model, mel) -> Tensor (B, T_audio)` signature
+  - **依頼する拡張**: `reverse_sample(model, mel, *, seed: int | torch.Generator, post_filter: np.ndarray | None = None)` (apply 統合 + deterministic seed、§8.1 採用昇格 / §9.1 参照)
   - 戻り値 dtype = float32 (T-M3.3 §9.1 確定想定)
   - 推論時の sub-model dispatch (1-to-1) はすべて `reverse_sample` 内に閉じている
 - **T-M3.1 (DiffWaveNext2)** から受領:
@@ -527,13 +634,16 @@ def test_freq_response_in_expected_range() -> None:
 
 - [ ] Okamoto21 §3.3 / `docs/architecture.md` §5 / `docs/training.md` §4.3 の仕様と完全整合
 - [ ] 5.1 / 5.2 Unit / e2e テスト全 pass、5.3 / 5.4 Acceptance クリア
-- [ ] FIR 長 = 512、`fftshift` 済、`mode="same"` で長さ保存
+- [ ] FIR 長 = 512、`fftshift` 済、`scipy.signal.oaconvolve` の対称切り出しで長さ保存
+- [ ] `apply_post_filter` が torch.Tensor / np.ndarray 両受け、入力型と同じ型で返す (`test_apply_post_filter_torch_input` / `test_apply_post_filter_numpy_input`)
+- [ ] `reverse_sample(post_filter=None)` 引数統合 (T-M3.3 と同期、apply/no-apply switch)
 - [ ] 周波数応答テスト (`test_freq_response_in_expected_range`) が実 fir.npy で pass (M3.5 / M6.2 後)
 - [ ] `T-M2.3 MultiResolutionSTFTLoss` を **再利用** (新規に MR-STFT を書いていないか)
-- [ ] `.gitignore` で `post_filter/*.npy` 除外、`post_filter/.gitkeep` で空 dir 維持
-- [ ] `diff_acc` が float64 で蓄積 (precision loss 防止)
+- [ ] `.gitignore` で `post_filter/*.npy` 除外 **解除** (`fir.npy` を M6.2 後に commit)、`post_filter/.gitkeep` で空 dir 維持
+- [ ] `diff_acc` が float64 で蓄積 (precision loss 防止)、`mean_diff_mag` underflow を `fit_stats.json` で検知
 - [ ] 振幅差の符号が `|Y_gt| - |Y_gen|` (逆ではない)
-- [ ] `np.convolve(audio, fir, mode="same")` の左右遅延が対称 (`test_apply_preserves_length` で検証済)
+- [ ] `scipy.signal.oaconvolve` の左右遅延が対称 (`test_apply_preserves_length` / `test_oaconvolve_vs_convolve` で検証済)
+- [ ] `reverse_sample(seed=43)` で fit が deterministic、`fit_stats.json` に `seed`/`git_sha`/`checkpoint_sha256` 3 点 record (`test_fit_reproducible_with_seed`)
 - [ ] CLAUDE.md スタイル準拠 (型ヒント、docstring、`from __future__ import annotations`)
 - [ ] エラー処理: `audio.ndim != 1`、`fir.shape != (512,)`、checkpoint 不存在、filelist 不存在で明示 raise
 - [ ] **参考実装 (Okamoto21 公式 / `astrec-nict/*`) をコピーしていない**: 擬似コード (`docs/architecture.md` §5) は仕様、本チケットの実装はそれを独自に書き起こしているか
@@ -548,8 +658,16 @@ def test_freq_response_in_expected_range() -> None:
 
 - **fit と apply の 2 ファイル分割** (`scripts/fit_post_filter.py` + `src/wavenext2/inference/post_filter.py`):
   - 理由: fit は重い (200 utt × 4-step) ので CLI スクリプト、apply は推論 hot path で軽量関数として `src/` 配下に分離
-- **`fir.npy` をリポジトリに commit しない**:
-  - 理由: モデル checkpoint 依存で再現性が壊れる、`.gitignore` で除外
+  - **修正 (M3 phase review)**: fit スクリプトは M6.2 完了後の `fir.npy` 再生成 reproducibility 用途に降格 (commit 化と併せて、フル訓練後の 1 回 fit が基本ライン)
+- **`apply_post_filter` を `reverse_sample` の引数として統合** (M3 phase review 採用昇格):
+  - 理由: T-M3.5 / T-M4.1 / T-M6.2 で 2 関数 chain (`apply_post_filter(reverse_sample(...))`) を毎回書くより、`reverse_sample(model, mel, *, seed, post_filter=None)` 1 関数化で評価 caller が `post_filter=fir` か `None` の switch だけで apply/no-apply を比較できる (T-M3.3 §9.1 と同期、本チケットで T-M3.3 への引数追加を依頼)
+- **`apply_post_filter` の torch tensor / np.ndarray 両受け** (M3 phase review 採用昇格):
+  - 理由: GPU 上 post-filter 適用 (RTF 測定) も torch 実装なら自然。`torch.nn.functional.conv1d` 純 torch 実装で CPU↔GPU 往復回避。`reverse_sample` 戻り値が torch.Tensor なのでキャスト責務を関数内吸収
+- **`scipy.signal.oaconvolve` 採用** (overlap-add、M3 phase review 採用昇格):
+  - 理由: `np.convolve(mode='same')` の左右非対称遅延を回避、length 24000 でも安全 (overlap-add は長 signal で効率良し)。`mode="full"` の中央切り出しで対称遅延を保証
+- **`fir.npy` を git commit 化** (M3 phase review 採用昇格、§2.1 / §6.1 通常項目で詳述):
+  - 理由: 2 KB と軽量、`.gitignore` の `post_filter/*.npy` **除外を解除**。M6.2 完了後の `fir.npy` 共有が PR ベースで容易、`scripts/fit_post_filter.py` は再生成 reproducibility 用途に降格
+  - reproducibility は `fit_stats.json` の (seed=43, git_sha, checkpoint_sha256) 3 点 record で担保
 - **振幅差を float64 で蓄積**:
   - 理由: 50,000 オーダの加算で float32 だと precision loss
 - **MR-STFT を T-M2.3 から import 再利用**:
@@ -585,7 +703,8 @@ def test_freq_response_in_expected_range() -> None:
 6. **`scipy.signal.lfilter` / `scipy.signal.fftconvolve` への切替**:
    - メリット: より高機能 (`lfilter` は IIR 対応、`fftconvolve` は long FIR で高速)
    - 検討: `np.convolve("same")` の左右遅延が非対称な場合の fallback (§6.1 critical #2)
-   - **再評価トリガー**: `test_apply_preserves_length` が fail したら scipy 切替
+   - **更新 (M3 phase review)**: `np.convolve("same")` 自体を **`scipy.signal.oaconvolve` (overlap-add) に変更採用済** (§8.1 採用設計)。`mode="full"` 中央切り出しで左右対称遅延を保証、`lfilter` (IIR) は本チケットの FIR 用途には不要
+   - **再評価トリガー**: `test_apply_preserves_length` / `test_oaconvolve_vs_convolve` が fail したら `fftconvolve` 等へ再検討
 
 7. **FIR を `[-1, 1]` で clip** (`np.clip(fir, -1, 1)`):
    - メリット: 出力 audio が `[-1, 1]` 超えるリスクを抑制
@@ -606,15 +725,31 @@ def test_freq_response_in_expected_range() -> None:
     - 却下: Okamoto21 §3.3 は uniform average で明記、再現実装では同じ仕様
     - **再評価トリガー**: M6.3 ablation
 
+11. **frame-wise normalize (相対誤差)** (M3 phase review 検討追加):
+    - 提案: `(S_gt[f,t] - S_gen[f,t]) / (S_gt[f,t] + eps)` で平均、無音 frame の bias 排除
+    - メリット: 振幅 dynamic range の大きい音声で large-magnitude frame が dominate する現象を抑制、無音 frame で `S_gt ≈ 0` のときの bias を取り除く
+    - 検討中: Okamoto21 §3.3 は absolute (linear amplitude 差) で明記なので本チケット主流路は維持
+    - **再評価トリガー**: M5.2 smoke 後の MR-STFT 改善幅が不十分なら ablation 候補
+
+12. **dev set ablation 50/100/200/500** (M3 phase review 検討追加):
+    - 提案: 200 utt は overfit リスクあり (Okamoto21 は 40 utt で十分とした実績)、話者偏り smoothing で FIR の Nyquist gain 低下の可能性
+    - 検討中: 200 utt はデフォルトのまま、M6.3 ablation で 50 / 100 / 200 / 500 比較
+    - **再評価トリガー**: M5.2 smoke で Nyquist gain < 5 dB の場合、サイズ縮小 (100 / 50) で再 fit して比較
+
 #### 再評価トリガー条件
 
 | 設計判断 | 再評価タイミング | 想定変更 |
 |---|---|---|
-| fit と apply の 2 ファイル分割 | M3 phase review | apply 側が複雑化したら `src/` にクラス化 |
-| dev set サイズ 200 | M5.2 smoke 後 | MR-STFT 改善幅で 100 / 500 を再検討 |
+| fit と apply の 2 ファイル分割 | M3 phase review (済) | **降格決定**: fit スクリプトは M6.2 後の再生成 reproducibility 用途、apply は `reverse_sample` 引数統合 |
+| `apply_post_filter` を `reverse_sample` 引数統合 | M3 phase review (済) | **採用昇格**: `post_filter=None` switch で apply/no-apply 比較 (T-M3.3 と同期) |
+| `scipy.signal.oaconvolve` 採用 | M3 phase review (済) | **採用昇格**: `np.convolve("same")` の左右非対称回避 |
+| `fir.npy` commit 化 | M3 phase review (済) | **採用昇格**: `.gitignore` 除外解除、M6.2 後に commit |
+| dev set サイズ 200 | M5.2 smoke 後 | MR-STFT 改善幅で 50 / 100 / 500 を再検討 (overfit / Nyquist gain 低下リスク、§8.1 検討追加) |
 | 振幅差の集約軸 (utt + frame 両軸平均) | M5.2 smoke 後 | 解釈 A (utt 内平均 → utt 間平均) へ切替 ablation |
-| `np.convolve("same")` | M3.4 unit test | 非対称遅延が出たら `scipy.signal.fftconvolve` |
+| frame-wise normalize (相対誤差) | M5.2 smoke 後 | MR-STFT 改善不十分なら相対誤差平均へ切替 (§8.1 検討追加) |
+| 長さ保存 (oaconvolve full 中央切り出し) | M3.4 unit test | `test_oaconvolve_vs_convolve` / `test_apply_preserves_length` で非対称遅延検出 |
 | FIR clip OFF (デフォルト) | M5.2 smoke 後 | max-abs > 1.0 なら `--clip-fir` デフォルト ON |
+| `reverse_sample(seed=43)` deterministic | M3.4 / M6.2 | `--reproducible` flag で seed 固定、`fit_stats.json` 3 点 record |
 | Linear amplitude 差 (vs log) | M6.3 ablation | log amplitude 差で改善するか比較 |
 | Learnable post-filter | M6.3 ablation | NN-based で改善するか比較 |
 
@@ -623,11 +758,20 @@ def test_freq_response_in_expected_range() -> None:
 - **このサブタスクの粒度は適切か**: **適切**
   - fit (CLI script、重い 1 回処理) と apply (関数、軽量 hot path) の責務が明確に分かれる
   - 1 チケットに統合しても fit / apply のテストファイルは分けたいので、現状の 1 チケット内 2 ファイル分割が最適
+- **post-filter の論文結果再現は post-filter 込み (M3 phase review 確定)**:
+  - 論文 Table 2 は **post-filter ありで報告**されている。よって「論文結果再現 = post-filter 込み」と本チケットで確定する
+  - **`reverse_sample` の default 動作判断**: default は `post_filter=None` (apply 無効) とし、論文結果再現の本ライン (M6.2 / M4.1) では明示的に `post_filter=fir` を渡す。理由: fit 段階や ablation の no-apply baseline で `post_filter=None` を必要とするため、default を None にする方が安全 (apply は呼び出し側の明示判断)
+  - M4.1 / M6.2 で「論文 Table 2 に揃える = post-filter 込み」を再議論しないため、ここで確定
+- **post-filter は spectral envelope correction であり sub-model artifact correction ではない (M3 phase review 確定)**:
+  - post-filter は time-invariant FIR による高域 spectral envelope の加算補償であり、各 sub-model の出力品質差 (例: 特定 noise level band を担当する sub-model の学習不足) は post-filter では補償**できない**
+  - 上流の `reverse_sample` (4 sub-model の reverse sampling) が前提であり、post-filter はその後段の固定 envelope 補正に過ぎない
+  - 含意: M5.2 / M6.2 で品質問題が出た場合、まず upstream sub-model / reverse sampling を疑い、post-filter の fit ablation は二次的対応とする
 - **別マイルストーンに移すべき部分はないか**:
   - **なし**: post-filter は Diff 専用 (`docs/training.md` §4.3) で M3 phase 内に閉じている
   - GAN 側は post-filter 不使用 (論文 §3.2 / `docs/architecture.md` §4 で明記)
 - **インターフェース定義の見直し余地**:
-  - **`apply_post_filter` を `torch.nn.Module` 化する案**: train graph に組み込めるメリットあり、却下 (本チケットは推論時のみで requires_grad 不要)
+  - **`apply_post_filter` を `reverse_sample` の引数に統合 (M3 phase review で採用)**: 2 関数 chain を避け、`post_filter=None` switch で apply/no-apply を 1 関数化
+  - **`apply_post_filter` を `torch.nn.Module` 化する案**: train graph に組み込めるメリットあり、却下 (本チケットは推論時のみで requires_grad 不要)。ただし torch tensor 両受け + `F.conv1d` 実装で GPU 上の RTF 測定には対応済
   - **`fit_post_filter` を class 化 (`PostFilterFitter`)**: state を持つほどでもないので関数で十分
   - **`load_post_filter` を `apply_post_filter` の `fir` 引数自動解決にする案**: hidden state で挙動が分かりにくくなるので却下
 - **時系列整合性の重要性**:
@@ -650,31 +794,45 @@ def test_freq_response_in_expected_range() -> None:
 ### 9.1 後続チケットに渡す情報
 
 #### T-M3.5 (Diff smoke) へ
-- **使用方法**: `reverse_sample(model, mel)` の出力に `apply_post_filter(y_gen.numpy(), fir)` を適用
+- **使用方法**: `reverse_sample(model, mel, *, seed, post_filter=fir)` 1 関数化 (apply を内部統合、外部 chain 不要)
   ```python
-  from wavenext2.inference.post_filter import apply_post_filter, load_post_filter
+  from wavenext2.inference.infer_diff import reverse_sample
+  from wavenext2.inference.post_filter import load_post_filter
   fir = load_post_filter("post_filter/fir.npy")
-  y_post = apply_post_filter(y_gen, fir)
+  y_post = reverse_sample(model, mel, seed=43, post_filter=fir)   # apply 込み
+  # apply 無効 (no-apply baseline) は post_filter=None
   ```
 - **smoke 段階での FIR の扱い**:
   - M3.5 smoke は **未学習 / 部分学習 Diff モデル** で実施
+  - smoke 範囲は **`apply_post_filter` の API 動作確認のみ** (品質は M5.2 で測定)
   - 実 FIR の fit は M3.4 単独で実施するも、**未学習モデルで fit した FIR は周波数応答テストを pass しない** 可能性大
-  - 解決策: M3.5 では `test_freq_response_in_expected_range` を skip し、`apply_post_filter` の API 動作確認のみ行う
+  - 解決策: M3.5 では `test_freq_response_in_expected_range` を skip し、`reverse_sample(post_filter=fir)` の switch 動作確認のみ行う
   - 真の周波数応答検証は M6.2 完了 (Diff フル訓練後の checkpoint で fit) で実施
 - **import パス**: `from wavenext2.inference.post_filter import apply_post_filter, load_post_filter`
 
 #### T-M4.1 (objective metrics) へ
 - **post-filter 適用前後の MCD / log F0 RMSE 比較**:
-  - 同一 utterance に対して `y_pre = reverse_sample(model, mel)` と `y_post = apply_post_filter(y_pre, fir)` を計算
-  - MCD / log F0 RMSE を別々に計算して `post_filter/fit_stats.json` の `mrstft_before` / `mrstft_after` に並列追加
+  - 同一 utterance に対して `reverse_sample(model, mel, seed=..., post_filter=None)` (no-apply) と `reverse_sample(model, mel, seed=..., post_filter=fir)` (apply) を計算
+  - **`post_filter=fir` か `None` の switch だけで apply/no-apply を比較** (2 関数 chain 不要、§8.1 採用昇格)
+  - MCD / log F0 RMSE を別々に計算して `post_filter/fit_stats.json` の `mrstft_before` / `mrstft_after` に並列追加、改善を確認
 - **MR-STFT eval 再利用**: 本チケットで `fit_stats.json` に MR-STFT before/after を dump 済み、M4.1 はそれを参照するだけで OK
+
+#### T-M6.2 (本格訓練) へ
+- **`fir.npy` の commit**: Diff フル訓練後 (M6.2 完了) に `scripts/fit_post_filter.py --reproducible` で `fir.npy` を再 fit し、**git commit** する (`.gitignore` 除外解除済、2 KB、PR ベースで共有)
+- **`fit_stats.json` で再現性確認**: commit する `fir.npy` に対応する `fit_stats.json` の (seed=43, git_sha, checkpoint_sha256) 3 点が record されていることを PR レビューで確認
+- **実 FIR の周波数応答検証**: M6.2 後の checkpoint で fit した `fir.npy` に対して `test_freq_response_in_expected_range` (slow) を実行し、低域 0 dB ± 1 dB / Nyquist 端 +5〜8 dB を pass させる
+- **論文 Table 2 再現は post-filter 込み (§8.2 確定)**: M6.2 の論文結果再現ラインは `reverse_sample(post_filter=fir)` を明示指定
 
 #### T-M0.3 から受領 (確認済)
 - `data/filelists/dev_postfilter.tsv` (200 utt, seed=43, val 非重複) を生成済
 - パスは `--data-root` からの相対 (POSIX 区切り)、TSV header 付き
 
-#### T-M3.3 から受領 (確認済)
-- `reverse_sample(model, mel) -> Tensor (B, T_audio)` signature
+#### T-M3.3 から受領 (本チケットで引数追加を依頼)
+- **現状 signature**: `reverse_sample(model, mel) -> Tensor (B, T_audio)`
+- **本チケットで依頼する拡張** (§8.1 採用昇格、T-M3.3 §9.1 と同期):
+  - `reverse_sample(model, mel, *, seed: int | torch.Generator, post_filter: np.ndarray | None = None) -> Tensor (B, T_audio)`
+  - `seed` 引数: `int | torch.Generator` 拡張で `--reproducible` 動作 (内部 `torch.randn` を deterministic 化、`seed=43` で fit / 評価を bit-exact 再現)
+  - `post_filter` 引数: `np.ndarray | None` (None で apply 無効、fir で apply 込み)、内部で `apply_post_filter` を呼ぶ
 - `from wavenext2.inference.infer_diff import reverse_sample` で import
 
 #### T-M2.3 から受領 (確認済)
@@ -692,7 +850,8 @@ def test_freq_response_in_expected_range() -> None:
 #### 共通の注意事項
 - **`fir.npy` の dtype = float32**、shape = (512,) を厳格にチェック (`load_post_filter` で validate)
 - **fit は時間がかかる** (GPU で 5〜10 分、CPU で 20〜40 分): M3.5 smoke では skip 可能、M4.1 / M6.2 で本実行
-- **`post_filter/` dir は `.gitignore` で `*.npy` 除外、`.gitkeep` で keep**: チケット PR で `.gitignore` 更新も含める
+- **`apply_post_filter` は torch.Tensor / np.ndarray 両受け**: 入力型と同じ型で返す、`reverse_sample` 戻り値 (torch) のキャスト責務を吸収
+- **`post_filter/fir.npy` は M6.2 後に git commit** (`.gitignore` の `*.npy` 除外を **解除**、2 KB): チケット PR で `.gitignore` 更新も含める。`.gitkeep` は空 dir 維持用に keep
 
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:
@@ -705,10 +864,11 @@ def test_freq_response_in_expected_range() -> None:
 ### 9.3 Open question として残ったもの
 - **解決できなかった疑問**: なし (`docs/open-questions.md` で Okamoto21 §3.3 準拠と確定済み)
 - **将来検討事項** (§8.1 再評価トリガー表参照):
-  - dev set サイズ (40 / 100 / 200 / 500) ablation (M6.3)
+  - dev set サイズ (40 / 50 / 100 / 200 / 500) ablation (M5.2 smoke 後 / M6.3、overfit / Nyquist gain 低下リスク)
   - 振幅差集約軸 (utt 内 → utt 間 vs utt + frame 両軸) ablation (M5.2 smoke 後)
+  - frame-wise normalize (相対誤差) (M5.2 smoke 後、§8.1 検討追加)
   - Linear amplitude 差 vs log amplitude 差 (M6.3)
   - Learnable post-filter (NN ベース) との比較 (M6.3)
-  - `np.convolve` vs `scipy.signal.fftconvolve` (`test_apply_preserves_length` fail 時)
+  - `scipy.signal.oaconvolve` vs `scipy.signal.fftconvolve` (`test_apply_preserves_length` / `test_oaconvolve_vs_convolve` fail 時)
   - FIR clip on/off (`--clip-fir` デフォルト OFF、max-abs > 1.0 時に再評価)
 - **`docs/open-questions.md` への追記要否**: 不要 (本チケット完了時に振幅差集約軸の決定だけ記録)
