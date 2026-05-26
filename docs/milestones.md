@@ -188,10 +188,10 @@ class LogMelSpectrogram(nn.Module):
         return torch.log(torch.clamp(self.mel(audio), min=eps))
 ```
 
-**Acceptance**:
-- [ ] GAN 設定で 1 秒 (24000 samples) 入力 → mel shape `(B, 128, 80)` (24000/300 = 80)
-- [ ] Diff 設定で 1 秒入力 → mel shape `(B, 128, 94)` (24000/256 ≈ 94)
-- [ ] 出力範囲が `[log(1e-5), log(max)]` ≈ `[-11.5, ?]` に収まる
+**Acceptance** (`tests/test_mel.py`、2026-05-27 完了、19 件 pass):
+- [x] GAN 設定で 1 秒 (24000 samples) 入力 → mel shape `(B, 128, 81)` (center=True: 1+24000//300=**81**、概算 80 から +1)
+- [x] Diff 設定で 1 秒入力 → mel shape `(B, 128, 94)` (1+24000//256=94)
+- [x] 出力範囲が `[log(1e-5), log(max)]` ≈ `[-11.51, ?]` に収まる (eps=1e-5 確定、SoT)
 
 ### M1.4 Generator (`src/wavenext2/models/generator.py`)
 **チケット**: [T-M1.4](tickets/T-M1.4-generator.md)

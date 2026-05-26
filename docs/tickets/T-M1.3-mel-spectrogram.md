@@ -3,11 +3,11 @@ id: T-M1.3
 title: Log-Mel spectrogram 抽出 (slaney scale/norm, power=1, log+clamp)
 milestone: M1
 phase: M1
-status: pending
+status: completed
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.1, T-M0.2]
 blocks: [T-M1.6, T-M2.1]
 related_docs:
@@ -403,10 +403,21 @@ milestones.md §M1.3 では GAN を「24000/300 = 80」、Diff を「24000/256 �
 - **再評価トリガー条件**: §8.1 末尾参照
 - **librosa との整合度許容差**: M5 smoke 完了時に `librosa.feature.melspectrogram` 出力と RMS 差を測定し、品質に影響しない閾値 (例: 1e-3) を確認。乖離が大きい場合は librosa 路線への切り替えを検討
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
-- 想定: torchaudio center=True で T_mel が `floor(T_audio / hop) + 1` になるかどうかは PyTorch / torchaudio バージョン依存の可能性あり。実機で確認
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `LogMelSpectrogram` 実装、`tests/test_mel.py` 19 件 pass (CPU/GPU)。学習パラメータ 0。`from_config` factory + DI (mel_transform 注入) 対応。
+- **T_mel 確定 (実機)**: center=True で `T_mel = 1 + T_audio // hop_length`。24000 sample → **GAN 81 / Diff 94**。milestones の「GAN 80」は +1 のずれで実際は **81** (center padding 由来)。
+
+想定外と対処:
+1. **eps をチケットの 1e-7 (Vocos warm-start 用) でなく 1e-5 で確定**: 本実装は **scratch 学習で Vocos 重みを warm-start しない** (CLAUDE.md がコピー禁止) ため 1e-7 の根拠が無効。CLAUDE.md / open-questions §C3 / configs (SoT) は全て **1e-5**。コード既定も 1e-5 に統一し全体整合。教訓: **「暫定値」より SoT (config + 確定ドキュメント) を優先**。チケット §2.3/§6.2 の 1e-7 記述は superseded。
+2. **config キー名の写像は呼び出し側責務**: configs は `hop`/`log_eps`、本モジュールは `hop_length`/`eps`。`from_config` は param 名 flat dict を受け、YAML→paramdict 写像は T-M2.5/T-M3.2 の config loader が行う設計に確定。`from_config` は `log_eps`→`eps` のみ alias 対応。
+3. **stateless `log_mel_spectrogram(audio,cfg)` は実装せず M5 へ延期** (YAGNI、評価系から需要が出た時点で追加)。
+4. **T_mel の SoT**: `1 + samples//hop` の式で厳密に導出できるため config に `T_mel_per_sec` フィールドは追加せず、式と実機値 (GAN 81/Diff 94) を §9.1 で申し送る。
+
+次の似たタスクで応用できる教訓:
+- 「暫定値」を採用する前に SoT (config/確定 docs) と矛盾しないか必ず照合する。warm-start 前提の値は scratch 学習では捨てる。
+- center=True の系列長は実機で pin し、ドキュメントの概算 (80) を実値 (81) に更新する。
 
 ## 9. 後続タスクへの連絡事項
 

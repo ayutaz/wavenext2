@@ -1,6 +1,5 @@
-"""wavenext2.data public API.
+"""wavenext2.data public API."""
 
-TODO: 後続チケットで `__all__` に re-export を追加。
-"""
+from wavenext2.data.mel import LogMelSpectrogram
 
-# __all__ = []  # 後続チケットで明示
+__all__ = ["LogMelSpectrogram"]
