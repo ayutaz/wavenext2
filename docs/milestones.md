@@ -78,7 +78,7 @@ einops             # tensor reshape 用 (任意)
 **Deliverable**: `src/`, `configs/`, `tests/`, `scripts/`, `checkpoints/`, `logs/` の作成
 
 ```bash
-src/
+src/wavenext2/
   data/{__init__.py, dataset.py, mel.py}
   models/{__init__.py, convnext.py, stft.py, generator.py, sub_model.py,
           noise_embedding.py, discriminator.py, gan_wavenext2.py, diff_wavenext2.py}
@@ -123,7 +123,7 @@ scripts/{prepare_libritts.py, extract_mel.py, fit_post_filter.py}
 
 ## M1: コア部品 (sub-model の構成要素) (作業量: large、6 サブタスク)
 
-### M1.1 ConvNeXt block (`src/models/convnext.py`)
+### M1.1 ConvNeXt block (`src/wavenext2/models/convnext.py`)
 **チケット**: [T-M1.1](tickets/T-M1.1-convnext-block.md)
 
 **Deliverable**: GAN/Diff 両対応の `ConvNeXtBlock` クラス
@@ -147,7 +147,7 @@ class ConvNeXtBlock(nn.Module):
 - [ ] パラメータ数: GAN 版 ~1.58M/block (= 1.58M × 8 で約 12.6M)、Diff 版 +0.26M (`Linear(512, 512)`)
 - [ ] gradient flow 確認: `loss = block(x).sum(); loss.backward()` で全パラメータに grad
 
-### M1.2 STFT module (`src/models/stft.py`)
+### M1.2 STFT module (`src/wavenext2/models/stft.py`)
 **チケット**: [T-M1.2](tickets/T-M1.2-stft-module.md)
 
 **Deliverable**: 波形 → STFT-spec (2F-2 ch) の変換モジュール
@@ -168,7 +168,7 @@ class STFTModule(nn.Module):
 - [ ] 実部・虚部の DC/Nyquist 扱いが正しい (虚部の最初/最後 bin が削除されている)
 - [ ] 単純な正弦波で round-trip テスト: STFT → 期待される周波数 bin にエネルギー集中
 
-### M1.3 Mel-spectrogram 抽出 (`src/data/mel.py`)
+### M1.3 Mel-spectrogram 抽出 (`src/wavenext2/data/mel.py`)
 **チケット**: [T-M1.3](tickets/T-M1.3-mel-spectrogram.md)
 
 **Deliverable**: `MelSpectrogram` クラス
@@ -188,7 +188,7 @@ class LogMelSpectrogram(nn.Module):
 - [ ] Diff 設定で 1 秒入力 → mel shape `(B, 128, 94)` (24000/256 ≈ 94)
 - [ ] 出力範囲が `[log(1e-5), log(max)]` ≈ `[-11.5, ?]` に収まる
 
-### M1.4 Generator (`src/models/generator.py`)
+### M1.4 Generator (`src/wavenext2/models/generator.py`)
 **チケット**: [T-M1.4](tickets/T-M1.4-generator.md)
 
 **Deliverable**: WaveNeXt-based generator
@@ -218,7 +218,7 @@ class WaveNextGenerator(nn.Module):
 - [ ] パラメータ数: GAN 版 ≈ 14.99M, Diff 版 ≈ 14.42M (Table 1 と整合)
 - [ ] 重み初期化: `Conv1d.weight.std() ≈ 0.02`, `Linear.bias` がゼロ
 
-### M1.5 Noise embedding (`src/models/noise_embedding.py`) [Diff のみ]
+### M1.5 Noise embedding (`src/wavenext2/models/noise_embedding.py`) [Diff のみ]
 **チケット**: [T-M1.5](tickets/T-M1.5-noise-embedding.md)
 
 **Deliverable**: sinusoidal + FC×2 SiLU の noise level embedding
@@ -241,7 +241,7 @@ class NoiseEmbedding(nn.Module):
 - [ ] 異なる c に対する出力が異なる (cosine similarity < 0.99)
 - [ ] freq の log-spaced 確認: `freq[0] / freq[-1] ≈ 10000` (= `log(10000)` スケール)
 
-### M1.6 Sub-model wrapper (`src/models/sub_model.py`)
+### M1.6 Sub-model wrapper (`src/wavenext2/models/sub_model.py`)
 **チケット**: [T-M1.6](tickets/T-M1.6-sub-model.md)
 
 **Deliverable**: `SubModelGAN` と `SubModelDiff`
@@ -275,7 +275,7 @@ class SubModelDiff(nn.Module):
 
 ## M2: GAN-WaveNeXt 2 (作業量: large、6 サブタスク)
 
-### M2.1 Dataset (`src/data/dataset.py`)
+### M2.1 Dataset (`src/wavenext2/data/dataset.py`)
 **チケット**: [T-M2.1](tickets/T-M2.1-dataset.md)
 
 **Deliverable**: LibriTTS-R loader + sox `norm` 正規化
@@ -296,7 +296,7 @@ class LibriTTSRDataset(Dataset):
 - [ ] segment_length より短い wav は反射 pad、長いものは random crop
 - [ ] mel と audio の時間長整合: `audio.shape[0] == mel.shape[1] * hop_length`
 
-### M2.2 Discriminator (`src/models/discriminator.py`)
+### M2.2 Discriminator (`src/wavenext2/models/discriminator.py`)
 **チケット**: [T-M2.2](tickets/T-M2.2-discriminator.md)
 
 **Deliverable**: MSD × 3 (WaveFit-PT 完全準拠、MPD なし)
@@ -306,7 +306,7 @@ class LibriTTSRDataset(Dataset):
 - [ ] 各 sub-discriminator の中間特徴も返す (FM loss 用)
 - [ ] AvgPool1d で隣接 sub-discriminator 間 downsample
 
-### M2.3 Loss 関数 (`src/losses/`)
+### M2.3 Loss 関数 (`src/wavenext2/losses/`)
 **チケット**: [T-M2.3](tickets/T-M2.3-losses.md)
 
 **Deliverable**:
@@ -320,7 +320,7 @@ class LibriTTSRDataset(Dataset):
 - [ ] MR-STFT: 3 resolution `[512,1024,2048]` × `[360,900,1800]` × `[80,150,300]`、各 SC + Mag L1
 - [ ] 重み: D-GAN=1.0, D-FM=10.0, MRSTFT-SC=2.5, MRSTFT-Mag=2.5
 
-### M2.4 GAN モデル (`src/models/gan_wavenext2.py`)
+### M2.4 GAN モデル (`src/wavenext2/models/gan_wavenext2.py`)
 **チケット**: [T-M2.4](tickets/T-M2.4-gan-model.md)
 
 **Deliverable**: T 個の sub-model を直列に並べた fixed-point iteration generator
@@ -342,7 +342,7 @@ class GANWaveNext2(nn.Module):
 - [ ] forward → backward が動作
 - [ ] T=1 で `y_0 = -sub_model(mel, zeros)`、つまり generator が直接波形を出力する形になっていることを確認
 
-### M2.5 Training script (`src/train/train_gan.py`)
+### M2.5 Training script (`src/wavenext2/train/train_gan.py`)
 **チケット**: [T-M2.5](tickets/T-M2.5-train-gan.md)
 
 **Deliverable**: AdamW + InverseLR + hinge GAN の交互更新ループ
@@ -373,7 +373,7 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 
 ## M3: Diff-WaveNeXt 2 (作業量: large、5 サブタスク)
 
-### M3.1 Diff モデル (`src/models/diff_wavenext2.py`)
+### M3.1 Diff モデル (`src/wavenext2/models/diff_wavenext2.py`)
 **チケット**: [T-M3.1](tickets/T-M3.1-diff-model.md)
 
 **Deliverable**: 4 sub-model を独立に扱える wrapper + point-specialized partition
@@ -399,7 +399,7 @@ class DiffWaveNext2(nn.Module):
 - [ ] `sample_noise_level(k=1)` の値が `[0.9929, 1.0]` に収まる (k=2,3,4 も同様)
 - [ ] パラメータ総数 = 4 × 14.42M ≈ 57.68M (Table 1)
 
-### M3.2 Training script (`src/train/train_diff.py`)
+### M3.2 Training script (`src/wavenext2/train/train_diff.py`)
 **チケット**: [T-M3.2](tickets/T-M3.2-train-diff.md)
 
 **Deliverable**: 各 sub-model を独立に MSE loss で訓練
@@ -415,7 +415,7 @@ class DiffWaveNext2(nn.Module):
 - [ ] noise level が band 内で uniform sampling されていることを TensorBoard で確認
 - [ ] 4 つの sub-model それぞれ独立に checkpoint 保存
 
-### M3.3 Reverse sampler (`src/inference/infer_diff.py`)
+### M3.3 Reverse sampler (`src/wavenext2/inference/infer_diff.py`)
 **チケット**: [T-M3.3](tickets/T-M3.3-reverse-sampler.md)
 
 **Deliverable**: DDPM 標準形 4-step sampling + 1-to-1 dispatch
@@ -438,7 +438,7 @@ def reverse_sample(model, mel, T=4):
 - [ ] mel → 4 step で `[-1, 1]` 範囲の波形が出力される
 - [ ] 同じ mel + 同じ seed で deterministic
 
-### M3.4 Post-filter (`src/inference/post_filter.py` + `scripts/fit_post_filter.py`)
+### M3.4 Post-filter (`src/wavenext2/inference/post_filter.py` + `scripts/fit_post_filter.py`)
 **チケット**: [T-M3.4](tickets/T-M3.4-post-filter.md)
 
 **Deliverable**: time-invariant spectral enhancement FIR の fit と apply
@@ -449,7 +449,7 @@ def fit_post_filter(model, dev_loader, n_fft=512, hop=256, fir_length=512):
     # 振幅差平均 → iRFFT → fftshift → fir.npy 保存
     ...
 
-# src/inference/post_filter.py
+# src/wavenext2/inference/post_filter.py
 def apply_post_filter(audio, fir):
     return np.convolve(audio, fir, mode="same")
 ```
@@ -473,7 +473,7 @@ def apply_post_filter(audio, fir):
 
 ## M4: 評価インフラ (作業量: medium、3 サブタスク)
 
-### M4.1 客観評価スクリプト (`src/eval/compute_metrics.py`)
+### M4.1 客観評価スクリプト (`src/wavenext2/eval/compute_metrics.py`)
 **チケット**: [T-M4.1](tickets/T-M4.1-objective-metrics.md)
 
 **Deliverable**: MCD, log F0 RMSE の自動計算
@@ -492,7 +492,7 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 ### M4.2 UTMOS / NISQA 連携
 **チケット**: [T-M4.2](tickets/T-M4.2-utmos-nisqa.md)
 
-**Deliverable**: `src/eval/run_utmos.py`, `src/eval/run_nisqa.py`
+**Deliverable**: `src/wavenext2/eval/run_utmos.py`, `src/wavenext2/eval/run_nisqa.py`
 
 - UTMOS: https://github.com/sarulab-speech/UTMOS22 を git submodule
 - NISQA: https://github.com/gabrielmittag/NISQA を pip install
@@ -500,7 +500,7 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 **Acceptance**:
 - [ ] GT 音声で UTMOS ≈ 4.0±0.2, NISQA ≈ 4.5±0.3 (LibriTTS-R は高品質なため)
 
-### M4.3 RTF 測定 (`src/eval/measure_rtf.py`)
+### M4.3 RTF 測定 (`src/wavenext2/eval/measure_rtf.py`)
 **チケット**: [T-M4.3](tickets/T-M4.3-rtf.md)
 
 **Deliverable**: GPU (A100) と CPU (1 core) での RTF 計測

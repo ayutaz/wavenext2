@@ -38,7 +38,7 @@ wavenext2/
 ├── configs/
 │   ├── gan_wavenext2.yaml
 │   └── diff_wavenext2.yaml
-├── src/
+├── src/wavenext2/
 │   ├── data/
 │   │   ├── dataset.py         # LibriTTS-R loader
 │   │   └── mel.py             # log-mel-spec 計算
@@ -83,16 +83,16 @@ wavenext2/
 - [ ] mel 抽出 (n_mels=128, hop=300 と hop=256 の両方)
 
 ### Phase 1: コア部品
-- [ ] `src/models/convnext.py`: ConvNeXt block 実装
+- [ ] `src/wavenext2/models/convnext.py`: ConvNeXt block 実装
   - dim=512, intermediate_dim=1536, kernel=7, LayerScale init=1e-6
   - GAN 版: 通常の ConvNeXt block
   - Diff 版: 入口に `Linear(512, dim)` の additive bias 注入を追加
-- [ ] `src/models/stft.py`: 入力波形 → STFT-spec 変換 (Section 3.1 通り)
+- [ ] `src/wavenext2/models/stft.py`: 入力波形 → STFT-spec 変換 (Section 3.1 通り)
   - Hann window, center=True, normalized=False, onesided=True
   - n_fft/win_length/hop は mel-spec と同一値
   - 時間軸 truncation (mel-spec の T_mel に合わせる)
   - 実部 (全帯域 F bin) + 虚部 (DC/Nyquist 除外 F-2 bin) を channel concat
-- [ ] `src/models/generator.py`: WaveNeXt-based generator (8 blocks)
+- [ ] `src/wavenext2/models/generator.py`: WaveNeXt-based generator (8 blocks)
   - `Conv1d(C_in, 512, k=7, p=3, bias=True)` → transpose → LN(512, eps=1e-6)
   - ConvNeXt × 8 (channels-last 形式で処理)
   - LN(512, eps=1e-6) (head 前の最終 LN、Vocos 慣例)
@@ -100,39 +100,39 @@ wavenext2/
   - reshape (B, T_mel, hop) → (B, T_mel*hop)
   - `torch.clip(-1, 1)`
   - 重み init: `trunc_normal_(std=0.02)`, bias は zero
-- [ ] `src/models/noise_embedding.py`: Diff 用
+- [ ] `src/wavenext2/models/noise_embedding.py`: Diff 用
   - sinusoidal embedding (dim=128, log(10000)/63 log-spaced)
   - FC1(128, 512) → SiLU → FC2(512, 512) → SiLU
-- [ ] `src/models/sub_model.py`: 1 sub-model = STFT module + generator
-- [ ] `src/data/mel.py`: Mel 抽出 (slaney scale + slaney norm + power=1 + 自然対数 + eps=1e-5)
-- [ ] `src/data/dataset.py`: LibriTTS-R loader + sox `norm` 正規化 (train: U(-6,-1), val: -3 dB)
+- [ ] `src/wavenext2/models/sub_model.py`: 1 sub-model = STFT module + generator
+- [ ] `src/wavenext2/data/mel.py`: Mel 抽出 (slaney scale + slaney norm + power=1 + 自然対数 + eps=1e-5)
+- [ ] `src/wavenext2/data/dataset.py`: LibriTTS-R loader + sox `norm` 正規化 (train: U(-6,-1), val: -3 dB)
 
 ### Phase 2: GAN-WaveNeXt 2
-- [ ] `src/models/discriminator.py`: MSD ×3 (WaveFit-PT と同一、MPD なし)
-- [ ] `src/models/gan_wavenext2.py`: T 個の sub-model を直列に並べる
+- [ ] `src/wavenext2/models/discriminator.py`: MSD ×3 (WaveFit-PT と同一、MPD なし)
+- [ ] `src/wavenext2/models/gan_wavenext2.py`: T 個の sub-model を直列に並べる
   - 初期入力 y_T = `torch.zeros_like(x_gt)`
-- [ ] `src/losses/`: hinge GAN loss / FM L1 / MR-STFT (SC + Mag L1)
-- [ ] `src/train/train_gan.py`:
+- [ ] `src/wavenext2/losses/`: hinge GAN loss / FM L1 / MR-STFT (SC + Mag L1)
+- [ ] `src/wavenext2/train/train_gan.py`:
   - Fixed-point iteration (ゼロ初期化、gain/denoising 制約なし)
   - Generator/Discriminator 交互更新
   - AdamW(lr=1e-4 G / 2e-4 D, β=[0.8, 0.99], wd=1e-3) + InverseLR
 - [ ] スモークテスト: 1〜2 epoch 動作確認
 
 ### Phase 3: Diff-WaveNeXt 2
-- [ ] `src/models/diff_wavenext2.py`: 4 sub-model を独立に扱える wrapper
+- [ ] `src/wavenext2/models/diff_wavenext2.py`: 4 sub-model を独立に扱える wrapper
 - [ ] Noise schedule: `ᾱ = [1.0e-04, 2.8e-02, 5.6e-01, 9.1e-01]` を固定で持つ
 - [ ] Sub-model partition: point-specialized 1-to-1 (`docs/architecture.md` §5)
   - sub-model 1: band `[0.9929, 1.0]` (ᾱ ≈ 1e-4 周辺)
   - sub-model 2: band `[0.8246, 0.9929)` (ᾱ ≈ 2.8e-2 周辺)
   - sub-model 3: band `[0.4817, 0.8246)` (ᾱ ≈ 5.6e-1 周辺)
   - sub-model 4: band `[0, 0.4817)` (ᾱ ≈ 9.1e-1 周辺)
-- [ ] `src/train/train_diff.py`: 各 sub-model を独立に MSE loss で訓練
+- [ ] `src/wavenext2/train/train_diff.py`: 各 sub-model を独立に MSE loss で訓練
   - Adam(lr=2e-4, β=[0.9, 0.98], wd=0)
 - [ ] Post-filter (time-invariant spectral enhancement) 実装 (`docs/architecture.md` §5)
 - [ ] スモークテスト
 
 ### Phase 4: 評価
-- [ ] `src/inference/infer_gan.py`, `infer_diff.py`
+- [ ] `src/wavenext2/inference/infer_gan.py`, `infer_diff.py`
 - [ ] MCD, log F0 RMSE 算出
 - [ ] UTMOS (https://github.com/sarulab-speech/UTMOS22), NISQA 連携
 - [ ] RTF 測定 (GPU と CPU 1-core)
