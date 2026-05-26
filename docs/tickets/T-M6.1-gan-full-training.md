@@ -233,7 +233,10 @@ rtf_cpu = measure_rtf(G, mels_100, device="cpu",  n_measure=100)   # 論文 CPU 
 
 ### 6.1 技術的リスク
 
-#### 【CRITICAL】RTF 参照値の T 取り違え (論文と一致と誤判定する)
+#### 【CRITICAL → ✅ 解決 (2026-05-27)】RTF 参照値の T 取り違え
+
+> **✅ 解決 (2026-05-27)**: `docs/paper-summary.md` L87-91/L113 を確認し、RTF 0.0066/0.20 と 74.93M は明示的に「(5 iter)」とラベルされた **T=5 の値**と確定 (74.93M = 5 × 14.99M で算術的にも一致、品質 MOS は L98 で「4 iter で HiFi-GAN 同等」)。`docs/milestones.md` L488 を「論文 RTF/param Table は 5 iter 値: T=5 で 0.0066/0.20/74.93M、T=4 は param 59.94M で品質が HiFi-GAN/WaveFit 5iter と同等、RTF は T=5 より速い (T=4 の直接値なし)」に修正済み。本チケットの RTF acceptance は §5 の「測定 T と参照行 T を一致させる」方針で確定。以下は確定の根拠 (実装時の判断材料として保持):
+
 - **問題**: `docs/paper-summary.md` L89/L113 の **RTF 0.0066 (GPU) / 0.20 (CPU) と 74.93M params は 5 iter (T=5) の値**。一方、本チケット §2.3 (L129)/§5.2 (L213) と `docs/milestones.md` L548 は同じ値を **T=4 の acceptance** にしている。T=4 は ~59.94M params で RTF も iter 数に比例して小さくなるはず。このまま **T=4 で測ると論文の T=5 値 (0.0066/0.20) に届かず「論文と一致せず」と誤判定**する (実際は別 T を比べているだけ)
 - **修正方針 (どちらかに統一)**: ① **T=4 を測るなら** `docs/paper-summary.md` の **T=4 行** (≈59.94M, T=4 相当の RTF) を参照値に引く / ② **T=5 との一致を見るなら** model config を **T=5** にして測る。本チケットは「best.pt は T=4 single config」なので原則 ① (T=4 行を参照)、ただし論文 Table と直接対比したいなら ② も検討
 - **着手手順**: 本チケット実装時に **`docs/paper-summary.md` L89/L113 の RTF/param 表を再確認し、T と iter 数の対応 (5 iter ⇔ T=? / T=4 ⇔ 何 M params・何 RTF) を確定**してから RTF acceptance を書き直す。確定前に RTF を測定しない (測っても誤判定するため)

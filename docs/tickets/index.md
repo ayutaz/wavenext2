@@ -97,6 +97,10 @@
 
 「ゼロから作り直すとしたら」の §8 セクションを各フェーズ完了時にエージェントチームで再評価する。実施記録は以下:
 
+> **実装着手前に解決した CRITICAL (2026-05-27)**:
+> 1. **Diff reverse step の β 負値** — 論文 schedule は denoising 順で ᾱ 増加列のため `β[1]=1-280=-279` で発散。`docs/training.md` §4.2 で **β 不使用の x_0 予測経由 DDIM/DDPM 一般形** (`σ²=η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)`, η で stochastic 切替) に確定。T-M3.3 §2 コードも β-free に更新済み (✅)。
+> 2. **RTF/param の T 取り違え** — `paper-summary.md` の 0.0066/0.20/74.93M は **5 iter (T=5)** 値と確定 (74.93M=5×14.99M)。品質 (MOS) は 4 iter で HiFi-GAN 同等。`milestones.md` L488 / T-M6.1 §6.1 を T=5 基準に修正済み (✅)。
+
 | マイルストーン | 完了日 | レビュー実施日 | 主な更新点 |
 |---|---|---|---|
 | M0 | — | 2026-05-26 | `src/wavenext2/` パッケージ化採用 (T-M0.2)、scaffold で Docker/CI/pre-commit/`.gitattributes`/`.env.example` stub を commit (T-M0.2)、filelist を TSV header 付き化 + speaker-balanced val + `dev_postfilter.tsv` 同時生成 + stats.json/audio_info.tsv 出力 (T-M0.3)、再現性関連リスク 6 件追加 (T-M0.1)、Critical: docs/training.md の `test-clean-100` 表記揺れを T-M0.3 実装時に解決予定 |

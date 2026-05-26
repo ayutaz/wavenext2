@@ -234,10 +234,12 @@ one_minus_abar = 1.0 - abar                                  # [0.9999, 0.972, 0
 sqrt_abar = np.sqrt(abar)                                     # [0.01, 0.167, 0.748, 0.954]
 sqrt_one_minus_abar = np.sqrt(one_minus_abar)                 # [0.99995, 0.9858, 0.6633, 0.3]
 
-# 隣接 t 間で β を逆算:
-# ᾱ_t = ᾱ_{t-1} * (1 - β_t)  ⇒  β_t = 1 - ᾱ_t / ᾱ_{t-1}
-# (t=1 については β_1 = 1 - ᾱ_1 と置く慣例で OK)
-# ※論文の denoising 方向: t = 4 (≈ノイズ) → t = 1 (≈クリーン)
+# 【CRITICAL】β を逆算してはならない:
+# 論文の schedule は denoising 順で ᾱ が増加列 [1e-4 → 9.1e-1] のため、
+# β_t = 1 - ᾱ_t/ᾱ_{t-1} を隣接点に適用すると β[1] = 1 - 280 = -279 のような
+# 負値になり α = 1-β > 1 で reverse step が発散する (連続 DDPM の 3-step
+# サブサンプリングで隣接 β は物理的意味を持たない)。
+# reverse step は β 不使用の x_0 予測経由式を使う (docs/training.md §4.2)。
 ```
 
 `ᾱ` index 順 t=1..4:
@@ -258,11 +260,14 @@ a = [1.0e-04, 2.8e-02, 5.6e-01, 9.1e-01]
 
 ### 推論 (Fig. 3)
 ```
-n ~ N(0, I)                              # 初期ノイズ
-for t in 4..1:
-    x_{t-1} = sub_model_t(mel, x_t, a_t)
-y_0 = post_filter(x_0)                    # Time-invariant spectral enhancement
+x ~ N(0, I)                              # 初期ノイズ (純ノイズ side, ᾱ=1e-4)
+for t in 1..4:                            # denoising 順 (ᾱ 増加方向)
+    eps_pred = sub_model_t(mel, x, c_t=√(1-ᾱ_t))
+    x0_hat   = (x - √(1-ᾱ_t)·eps_pred) / √(ᾱ_t)            # x_0 推定 (β 不使用)
+    x        = √(ᾱ_next)·x0_hat + √(1-ᾱ_next-σ²)·eps_pred + σ·z   # 次のクリーン側へ射影
+y_0 = post_filter(x)                      # Time-invariant spectral enhancement
 ```
+詳細な reverse step 式 (DDIM/DDPM 一般形、β 不使用、`σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)`) は `docs/training.md` §4.2 参照。
 
 ### Noise level conditioning の注入方法 [FastDiff `modules/FastDiff/module/FastDiff_model.py` で確定]
 

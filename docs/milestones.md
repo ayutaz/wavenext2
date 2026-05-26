@@ -545,7 +545,7 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 - [ ] 2M step 完走 (or early stop)
 - [ ] validation MR-STFT loss がプラトー
 - [ ] 客観評価: UTMOS, NISQA, MCD, log F0 RMSE が論文 Table 1〜3 と概ね一致 (±10%)
-- [ ] RTF が論文と一致 (T=4 で GPU 0.0066, CPU 0.20)
+- [ ] RTF が論文と一致 (**論文の RTF/param Table は 5 iter 値**: T=5 で GPU 0.0066 / CPU 0.20 / 74.93M)。T=4 は param 59.94M で品質 (MOS) が HiFi-GAN / WaveFit 5 iter と同等、RTF は T=5 より速い (論文に T=4 の RTF 直接値なし)
 
 **Claude Code の役割**:
 - 訓練を `bash` で `run_in_background=true` で起動

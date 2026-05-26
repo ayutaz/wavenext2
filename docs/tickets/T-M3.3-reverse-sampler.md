@@ -7,7 +7,7 @@ status: pending
 size: M
 owner: -
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M3.1]
 blocks: [T-M3.4, T-M3.5, T-M4.3]
 related_docs:
@@ -24,11 +24,13 @@ related_docs:
 ## 1. タスク目的とゴール
 
 ### 目的
-論文 Section 3.3 / Figure 3 / `docs/training.md` §4.2 に示される **DDPM 標準形 4-step reverse sampling** を 1 関数 (`reverse_sample`) に閉じ込め、`DiffWaveNext2` (T-M3.1) を入力として **mel-spectrogram から波形 `(B, T_audio)` を合成する唯一のエントリポイント** とする。
+論文 Section 3.3 / Figure 3 / `docs/training.md` §4.2 に示される **DDIM/DDPM 一般形 4-step reverse sampling (x_0 予測経由、β-free)** を 1 関数 (`reverse_sample`) に閉じ込め、`DiffWaveNext2` (T-M3.1) を入力として **mel-spectrogram から波形 `(B, T_audio)` を合成する唯一のエントリポイント** とする。
 
 - **point-specialized 1-to-1 dispatch**: 各 reverse step `t ∈ {1, 2, 3, 4}` で sub-model k=t を直接呼ぶ (band 判定不要、`docs/architecture.md` §5)
-- **DDPM 標準形**: `x_{t-1} = (1/√(1-β_t)) · (x_t - (β_t/√(1-ᾱ_t)) · ε_θ) + σ_t z` (Ho et al., 2020 Eq.11)
-- **noise schedule**: `ᾱ = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]` を `DiffWaveNext2.NOISE_SCHEDULE_ABAR` から取得し β/σ を逆算
+- **β-free な x_0 予測経由式** (`docs/training.md` §4.2): 各 step で `x0_hat = (x - √(1-ᾱ_t)·ε_θ) / √(ᾱ_t)` を推定し、次のクリーン側 `ᾱ_next` (最終は 1.0) へ射影 `x = √(ᾱ_next)·x0_hat + √(1-ᾱ_next-σ²)·ε_θ + σ·z`、`σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)`
+- **β を一切計算しない**: 論文 schedule は denoising 順で ᾱ が増加列のため `β_t = 1 - ᾱ_t/ᾱ_{t-1}` が負値 (`β[1]=-279`) になり発散する。x_0 予測経由なら denoising 方向で `ᾱ_t < ᾱ_next ⇒ σ² ≥ 0` で構造的に安全 (§6.1 参照)
+- **noise schedule**: `ᾱ = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]` を `DiffWaveNext2.NOISE_SCHEDULE_ABAR` から取得 (β 逆算なし)
+- **eta フラグ**: `eta=1.0` で DDPM (確率的)、`eta=0.0` で DDIM (決定論的)。§8.1 で v1 採用
 - **post-filter は本チケットでは適用しない**: T-M3.4 で別途実装、本チケットは plain reverse sample のみ
 
 これにより:
@@ -37,10 +39,10 @@ related_docs:
 - T-M4.3 (RTF) は `reverse_sample` の wall time を直接測定
 
 ### ゴール
-- [ ] `src/wavenext2/inference/infer_diff.py` に `reverse_sample(model, mel, *, seed=None) -> Tensor` 関数が実装され、`from wavenext2.inference.infer_diff import reverse_sample` で import 可能
-- [ ] `DiffWaveNext2.NOISE_SCHEDULE_ABAR` (shape `(4,)`、device-aware) から β/α/σ を逆算する純粋関数 `_compute_ddpm_coefficients(abar) -> dict[str, Tensor]` を helper として切り出し、unit test 可能にする
-- [ ] 4-step ループで sub-model k (k=1..4, 1-indexed) を 1 回ずつ呼び、reverse step を順に適用、最終 `x ∈ (B, T_audio)` を `clamp(-1, 1)` して返す
-- [ ] `seed=None` で stochastic (`torch.randn` 直接呼び出し)、`seed=int` で `torch.Generator(device=mel.device).manual_seed(seed)` 経由で deterministic
+- [ ] `src/wavenext2/inference/infer_diff.py` に `reverse_sample(model, mel, *, seed=None, eta=1.0) -> Tensor` 関数が実装され、`from wavenext2.inference.infer_diff import reverse_sample` で import 可能
+- [ ] `DiffWaveNext2.NOISE_SCHEDULE_ABAR` (shape `(4,)`、device-aware) から **β を計算せず** 各 step の `(abar_t, abar_next, sqrt_abar_t, sqrt_one_minus_abar_t)` と σ² 計算用の値を返す純粋関数 `_compute_ddpm_coefficients(abar) -> dict[str, Tensor]` を helper として切り出し、unit test 可能にする
+- [ ] 4-step ループで sub-model k (k=1..4, 1-indexed) を 1 回ずつ呼び、x_0 予測経由の射影式 (β-free) を順に適用、最終 `x ∈ (B, T_audio)` を `clamp(-1, 1)` して返す
+- [ ] `eta` で stochasticity 制御 (`eta=1.0` DDPM / `eta=0.0` DDIM)、`seed=None` で stochastic (`torch.randn` 直接呼び出し)、`seed=int` で `torch.Generator(device=mel.device).manual_seed(seed)` 経由で deterministic
 - [ ] `T_audio = T_mel * model.hop_length`(= 256) を自動算出、`model.eval()` モードを内部で保証 (revert は呼び出し側責務 OR with-context で実装)
 - [ ] forward は `torch.no_grad()` で実行、autograd graph を構築しない
 - [ ] `tests/test_reverse_sampler.py` が `uv run pytest tests/test_reverse_sampler.py` で全 pass
@@ -69,20 +71,26 @@ from wavenext2.inference.infer_diff import _compute_ddpm_coefficients
 #### 関数シグネチャ
 
 ```python
-"""infer_diff.py — Diff-WaveNeXt 2 の DDPM 4-step reverse sampling.
+"""infer_diff.py — Diff-WaveNeXt 2 の DDIM/DDPM 一般形 4-step reverse sampling.
 
 論文 §3.3 / docs/training.md §4.2 / docs/architecture.md §5 を実装する。
 
-- DDPM 標準形 (Ho et al., 2020 Eq. 11):
-    x_{t-1} = (1/√(1-β_t)) (x_t - (β_t/√(1-ᾱ_t)) ε_θ(x_t, c, t)) + σ_t z
-    σ_t² = β_t · (1 - ᾱ_{t-1}) / (1 - ᾱ_t)   (慣例: ᾱ_0 = 1, σ_0 = 0)
+- x_0 予測経由の DDIM/DDPM 一般形 (β-free):
+    x0_hat = (x_t - √(1-ᾱ_t) · ε_θ(x_t, c)) / √(ᾱ_t)
+    x_next = √(ᾱ_next) · x0_hat + √(1-ᾱ_next-σ²) · ε_θ + σ · z   (z ~ N(0, I))
+    σ²     = η² · (1-ᾱ_next) / (1-ᾱ_t) · (1 - ᾱ_t/ᾱ_next)
+  最終 step は ᾱ_next = 1 で x = x0_hat。
+- β は一切計算しない。論文 schedule は denoising 順で ᾱ が増加列のため
+  β_t = 1 - ᾱ_t/ᾱ_{t-1} が負値 (β[1] = -279) になり発散する。x_0 予測経由なら
+  denoising 方向で ᾱ_t < ᾱ_next ⇒ σ² ≥ 0 で構造的に安全 (docs/training.md §4.2 CRITICAL)。
 - noise schedule: ᾱ = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1] (`DiffWaveNext2.NOISE_SCHEDULE_ABAR`)
+- eta: 1.0 → DDPM (確率的) / 0.0 → DDIM (決定論的)。§8.1 で v1 採用 (stochastic フラグ)
 - 1-to-1 dispatch: reverse step t (denoising 順 1..4) で sub-model k=t を直接呼ぶ
   (point-specialized partition、band 判定不要、docs/architecture.md §5)
 - post-filter は本関数では適用しない (T-M3.4 で別途実装、本関数は plain reverse sample のみ)
 
 公開 API:
-- reverse_sample(model, mel, *, seed=None) -> Tensor:
+- reverse_sample(model, mel, *, seed=None, eta=1.0) -> Tensor:
     mel から波形 (B, T_mel * hop_length) を合成する唯一のエントリポイント。
 """
 
@@ -97,46 +105,44 @@ from wavenext2.models.diff_wavenext2 import DiffWaveNext2
 def _compute_ddpm_coefficients(
     abar: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
-    """ᾱ_t (cumulative noise level) から β/α/σ/√(1-ᾱ) を逆算する pure function.
+    """ᾱ_t (cumulative noise level) から x_0 予測経由式に必要な値を返す pure function.
+
+    **β を一切計算しない** (docs/training.md §4.2)。論文 schedule は denoising 順で
+    ᾱ が増加列のため β_t = 1 - ᾱ_t/ᾱ_{t-1} が負値になり発散する。x_0 予測経由の
+    射影式は β を必要とせず、各 step の ᾱ_t / ᾱ_next と √ 値だけで成立する。
 
     Args:
         abar: shape (K,)、要素は denoising 順 t=1..K で `ᾱ_1 < ᾱ_2 < ... < ᾱ_K`
               (t=1 が最高ノイズ、t=K が最低ノイズ)。論文の 4-step では K=4。
 
     Returns:
-        dict with keys:
-          - "beta":              shape (K,), β_t = 1 - ᾱ_t / ᾱ_{t-1} (慣例: ᾱ_0 = 1)
-          - "alpha":             shape (K,), α_t = 1 - β_t
-          - "sqrt_abar":         shape (K,), √ᾱ_t
-          - "sqrt_one_minus_abar": shape (K,), √(1-ᾱ_t) (= conditioning c_t)
-          - "sigma":             shape (K,), σ_t = √(β_t · (1-ᾱ_{t-1})/(1-ᾱ_t))
-                                  ※ 最終 step t=K は σ_K = 0 (decoder-like deterministic)
+        dict with keys (**beta / alpha は含まない**):
+          - "abar":                shape (K,),   ᾱ_t (そのまま保持、射影で √ᾱ_next を引くため)
+          - "abar_next":           shape (K,),   ᾱ_{next} = denoising 順で 1 つクリーン側
+                                                  (t<K は ᾱ_{t+1}、t=K は 1.0)
+          - "sqrt_abar":           shape (K,),   √ᾱ_t (x0_hat の分母)
+          - "sqrt_one_minus_abar": shape (K,),   √(1-ᾱ_t) (= conditioning c_t、x0_hat の係数)
 
     Notes:
-        - device/dtype は abar から継承
+        - σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next) は eta に依存するため
+          reverse_sample 側で都度計算する (本 helper は eta 非依存の値のみ返す)
+        - denoising 方向で ᾱ_t < ᾱ_next ⇒ 1 - ᾱ_t/ᾱ_next ≥ 0 ⇒ σ² ≥ 0 (負値問題なし)
+        - device/dtype は abar から継承、in-place 演算なし (pure)
         - K=1 (degenerate) は本実装範囲外、論文の 4-step のみ想定
     """
     K = abar.shape[0]
-    beta = torch.empty_like(abar)
-    beta[0] = 1.0 - abar[0]                       # 慣例: ᾱ_0 = 1 ⇒ β_1 = 1 - ᾱ_1
-    beta[1:] = 1.0 - abar[1:] / abar[:-1]         # β_t = 1 - ᾱ_t / ᾱ_{t-1}
-    alpha = 1.0 - beta
     sqrt_abar = torch.sqrt(abar)
     sqrt_one_minus_abar = torch.sqrt(1.0 - abar)
 
-    sigma = torch.zeros_like(abar)
-    # σ_t² = β_{t+1} · (1 - ᾱ_t) / (1 - ᾱ_{t+1})  (denoising 順、次のステップを見る)
-    # ※ 最終 step (t=K) は σ_K = 0
-    for t in range(K - 1):
-        denom = 1.0 - abar[t + 1]
-        sigma[t] = torch.sqrt(beta[t + 1] * (1.0 - abar[t]) / denom)
-    sigma[K - 1] = 0.0
+    # ᾱ_next: t<K は次のクリーン側 ᾱ_{t+1}、最終 step t=K は完全クリーン 1.0
+    abar_next = torch.empty_like(abar)
+    abar_next[: K - 1] = abar[1:]                 # ᾱ_{t+1} (t=1..K-1)
+    abar_next[K - 1] = 1.0                         # 最終 step は ᾱ_next = 1 (完全クリーン)
     return {
-        "beta": beta,
-        "alpha": alpha,
+        "abar": abar,
+        "abar_next": abar_next,
         "sqrt_abar": sqrt_abar,
         "sqrt_one_minus_abar": sqrt_one_minus_abar,
-        "sigma": sigma,
     }
 
 
@@ -146,8 +152,9 @@ def reverse_sample(
     mel: torch.Tensor,
     *,
     seed: int | None = None,
+    eta: float = 1.0,
 ) -> torch.Tensor:
-    """DDPM 4-step reverse sampling で mel から波形を合成する.
+    """DDIM/DDPM 一般形 4-step reverse sampling (β-free) で mel から波形を合成する.
 
     Args:
         model: DiffWaveNext2 instance (T-M3.1)。
@@ -158,32 +165,38 @@ def reverse_sample(
         mel:   (B, 128, T_mel) log-mel-spectrogram (Diff 設定 hop=256, n_fft=1024)
         seed:  None → stochastic (`torch.randn` 直接呼び出し)、
                int → `torch.Generator(device=mel.device).manual_seed(seed)` で deterministic
+        eta:   stochasticity フラグ。1.0 → DDPM (確率的、σ·z を加算) /
+               0.0 → DDIM (決定論的、σ=0)。§8.1 で v1 採用。
 
     Returns:
         (B, T_audio) 合成波形 ∈ [-1, 1]、`T_audio = T_mel * model.hop_length`
 
-    Algorithm (docs/training.md §4.2 を完全準拠):
-        abar = model.NOISE_SCHEDULE_ABAR              # (4,)、denoising 順 t=1..4
-        coef = _compute_ddpm_coefficients(abar)       # β, σ, √(1-ᾱ) を逆算
+    Algorithm (docs/training.md §4.2 を完全準拠、β 不使用):
+        abar = model.NOISE_SCHEDULE_ABAR              # (4,)、denoising 順 t=1..4 (ᾱ 増加列)
+        coef = _compute_ddpm_coefficients(abar)       # ᾱ_t, ᾱ_next, √ᾱ_t, √(1-ᾱ_t) (β なし)
         x = torch.randn(B, T_audio)                    # 初期 Gaussian noise (t=1 入力)
         for t in 1..4 (denoising 順、1-indexed):
-            c_t = coef["sqrt_one_minus_abar"][t-1]    # conditioning value
+            c_t = coef["sqrt_one_minus_abar"][t-1]    # conditioning value √(1-ᾱ_t)
             k = t                                      # 1-to-1 dispatch (point-specialized)
             eps = model.sub_models[k-1](mel, x, c_t.expand(B))
-            # DDPM 標準 reverse step:
+            # 1. x_0 を推定 (β 不使用):
+            x0_hat = (x - √(1-ᾱ_t) · eps) / √(ᾱ_t)
+            x0_hat = x0_hat.clamp(-1, 1)               # 波形は [-1, 1] (任意)
             if t < 4:
-                # 通常 step: x_{t+1} を導出 (推論順での次ステップ、次の β を使う)
-                beta_next = coef["beta"][t]            # β_{t+1} (0-indexed なので [t])
-                x = (1.0 / sqrt(1.0 - beta_next)) * (
-                    x - (beta_next / coef["sqrt_one_minus_abar"][t-1]) * eps
-                )
-                x = x + coef["sigma"][t-1] * z         # z ~ N(0, I)、seed があれば deterministic
+                # 2. 次のクリーン側 ᾱ_next へ射影 (DDIM/DDPM 一般形):
+                #    σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1 - ᾱ_t/ᾱ_next)  ≥ 0 (denoising 方向)
+                sigma2   = eta**2 * (1-ᾱ_next)/(1-ᾱ_t) * (1 - ᾱ_t/ᾱ_next)
+                coef_eps = √(clamp(1 - ᾱ_next - σ², min=0))
+                x = √(ᾱ_next) · x0_hat + coef_eps · eps
+                if eta > 0:
+                    x = x + √(σ²) · z                  # z ~ N(0, I)、seed があれば deterministic
             else:
-                # 最終 step (t=4): decoder のように deterministic、ε で完全に denoise
-                x = (x - coef["sqrt_one_minus_abar"][t-1] * eps) / coef["sqrt_abar"][t-1]
+                # 3. 最終 step (t=4): ᾱ_next = 1 で x_0 推定値がそのまま出力
+                x = x0_hat
         return x.clamp(-1.0, 1.0)
 
     Notes:
+        - **β を一切計算しない** (§6.1 CRITICAL): denoising 方向で ᾱ_t < ᾱ_next ⇒ σ² ≥ 0
         - `@torch.no_grad()` で autograd graph を構築しない
         - `model.eval()` 切替は本関数内で保証しない (呼び出し側責務、§6.1 参照)
         - post-filter は本関数では適用しない (T-M3.4)
@@ -193,7 +206,7 @@ def reverse_sample(
     B, _, T_mel = mel.shape
     T_audio = T_mel * model.hop_length
 
-    # DDPM coefficients を逆算 (device 同期)
+    # x_0 予測経由式に必要な係数を取得 (β は計算しない、device 同期)
     abar = model.NOISE_SCHEDULE_ABAR.to(device=device, dtype=dtype)
     coef = _compute_ddpm_coefficients(abar)
 
@@ -212,22 +225,31 @@ def reverse_sample(
 
     for t in range(1, K + 1):       # t = 1..4 (1-indexed)
         idx = t - 1                  # 0-indexed for tensor access
-        c_t = coef["sqrt_one_minus_abar"][idx].expand(B)
+        abar_t = coef["abar"][idx]
+        abar_next = coef["abar_next"][idx]            # t<K: ᾱ_{t+1}、t=K: 1.0
+        sqrt_abar_t = coef["sqrt_abar"][idx]
+        sqrt_one_minus_abar_t = coef["sqrt_one_minus_abar"][idx]
+        c_t = sqrt_one_minus_abar_t.expand(B)
         # === point-specialized 1-to-1 dispatch ===
         # docs/architecture.md §5: reverse step t で sub-model k=t を呼ぶ (band 判定不要)
         eps_pred = model.sub_models[idx](mel, x, c_t)
 
+        # 1. x_0 を推定 (β 不使用)
+        x0_hat = (x - sqrt_one_minus_abar_t * eps_pred) / sqrt_abar_t
+        x0_hat = x0_hat.clamp(-1.0, 1.0)              # 波形は [-1, 1] (任意)
+
         if t < K:
-            # 通常 reverse step (DDPM Eq. 11、推論順の次ステップ用 β を使う)
-            beta_next = coef["beta"][t]   # β_{t+1} (1-indexed の t+1 == 0-indexed の t)
-            x = (1.0 / torch.sqrt(1.0 - beta_next)) * (
-                x - (beta_next / coef["sqrt_one_minus_abar"][idx]) * eps_pred
-            )
-            # 後方分散項 σ_t (最終 step 以外は z 加算)
-            x = x + coef["sigma"][idx] * randn_like_x(x.shape)
+            # 2. 次のクリーン側 ᾱ_next へ射影 (DDIM/DDPM 一般形、β-free)
+            #    σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1 - ᾱ_t/ᾱ_next)
+            #    denoising 方向で ᾱ_t < ᾱ_next ⇒ 1 - ᾱ_t/ᾱ_next ≥ 0 ⇒ σ² ≥ 0 (負値問題なし)
+            sigma2 = eta ** 2 * (1.0 - abar_next) / (1.0 - abar_t) * (1.0 - abar_t / abar_next)
+            coef_eps = torch.sqrt(torch.clamp(1.0 - abar_next - sigma2, min=0.0))
+            x = torch.sqrt(abar_next) * x0_hat + coef_eps * eps_pred
+            if eta > 0:
+                x = x + torch.sqrt(sigma2) * randn_like_x(x.shape)
         else:
-            # 最終 step (t=K=4): σ = 0、deterministic decode
-            x = (x - coef["sqrt_one_minus_abar"][idx] * eps_pred) / coef["sqrt_abar"][idx]
+            # 3. 最終 step (t=K=4): ᾱ_next = 1 で x_0 推定値がそのまま出力
+            x = x0_hat
 
     return x.clamp(-1.0, 1.0)
 ```
@@ -240,7 +262,10 @@ def reverse_sample(
 | `K` (step 数) | 4 | docs/training.md §3.3 / Fig 3 |
 | `hop_length` | 256 | docs/architecture.md §3, docs/training.md §1.2 |
 | 初期 `x` 分布 | `N(0, I)` | docs/training.md §4.2, DDPM 標準 |
-| 最終 step σ | **0** (deterministic decode) | docs/training.md §4.2 「最終ステップは ε で完全に denoise」 |
+| `eta` (stochasticity) | **1.0** (DDPM) default、`0.0` で DDIM | docs/training.md §4.2, §8.1 v1 採用 |
+| `σ²` (η>0 時) | `η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)` ≥ 0 | docs/training.md §4.2 (β-free) |
+| 最終 step (`ᾱ_next=1`) | `x = x0_hat` (射影なし) | docs/training.md §4.2 「最終ステップは x_0 推定値がそのまま出力」 |
+| `β` 逆算 | **しない** (構造的に負値・発散) | docs/training.md §4.2 CRITICAL |
 | sub-model dispatch | **1-to-1 (k=t)** | docs/architecture.md §5, docs/open-questions.md §B1 |
 | 出力 clip | `[-1, 1]` (関数末尾で適用) | docs/architecture.md §2 (clip(-1,1)) |
 | autograd | `@torch.no_grad()` | 推論専用 (T-M4.3 RTF 測定にも必要) |
@@ -248,28 +273,33 @@ def reverse_sample(
 
 ### 2.4 アルゴリズム / 処理フロー
 
-#### `_compute_ddpm_coefficients(abar)` (pure helper)
-1. `beta[0] = 1 - abar[0]`、`beta[1:] = 1 - abar[1:]/abar[:-1]` (慣例 `ᾱ_0 = 1`)
-2. `alpha = 1 - beta`、`sqrt_abar = √abar`、`sqrt_one_minus_abar = √(1-abar)`
-3. `sigma[t] = √(β_{t+1} · (1-ᾱ_t) / (1-ᾱ_{t+1}))` for `t=0..K-2`、`sigma[K-1] = 0`
-4. 全テンソルを `abar` の device/dtype と同じに保つ
-5. dict として返す (named tuple は将来 §8 で検討)
+#### `_compute_ddpm_coefficients(abar)` (pure helper、β-free)
+1. `sqrt_abar = √abar`、`sqrt_one_minus_abar = √(1-abar)`
+2. `abar_next[:K-1] = abar[1:]` (denoising 順で 1 つクリーン側 ᾱ_{t+1})、`abar_next[K-1] = 1.0` (最終 step は完全クリーン)
+3. **β / α / σ は計算しない** (denoising 順で ᾱ 増加列のため β が負値になり発散、§6.1 CRITICAL)
+4. σ² は eta 依存なので reverse_sample 側で都度計算 (本 helper は eta 非依存の値のみ返す)
+5. 全テンソルを `abar` の device/dtype と同じに保つ (in-place 演算なし)
+6. dict (`abar`, `abar_next`, `sqrt_abar`, `sqrt_one_minus_abar`) として返す
 
-#### `reverse_sample(model, mel, *, seed=None)`
+#### `reverse_sample(model, mel, *, seed=None, eta=1.0)`
 1. `B, _, T_mel = mel.shape` を取得、`T_audio = T_mel * model.hop_length`
 2. `abar = model.NOISE_SCHEDULE_ABAR.to(device=mel.device, dtype=mel.dtype)`
-3. `coef = _compute_ddpm_coefficients(abar)`
+3. `coef = _compute_ddpm_coefficients(abar)` (β なし)
 4. seed が指定されたら `gen = torch.Generator(device=mel.device).manual_seed(seed)`、否なら `None`
 5. `x = randn_like_x((B, T_audio))` で初期化 (denoising 順 t=1 入力)
 6. `for t in range(1, K+1):` (1-indexed denoising 順):
    - `idx = t - 1`
-   - `c_t = coef["sqrt_one_minus_abar"][idx].expand(B)`
+   - `abar_t, abar_next, sqrt_abar_t, sqrt_one_minus_abar_t` を coef から取得
+   - `c_t = sqrt_one_minus_abar_t.expand(B)`
    - `eps_pred = model.sub_models[idx](mel, x, c_t)` (1-to-1 dispatch)
-   - `t < K`: 通常 DDPM step + σ·z
-   - `t == K`: 最終 step (σ=0、ε で完全 denoise)
+   - `x0_hat = (x - √(1-ᾱ_t)·eps_pred) / √(ᾱ_t)`、`x0_hat.clamp(-1, 1)`
+   - `t < K`: `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)`、`x = √(ᾱ_next)·x0_hat + √(clamp(1-ᾱ_next-σ²,0))·eps_pred`、η>0 なら `+ √(σ²)·z`
+   - `t == K`: 最終 step (ᾱ_next=1、`x = x0_hat`)
 7. `return x.clamp(-1, 1)`
 
 #### 不変条件
+- **β を一切計算しない** (helper 戻り値に beta key なし、forward path でも参照しない)
+- denoising 方向で `ᾱ_t < ᾱ_next` ⇒ `σ² ≥ 0` (全 step で sqrt の中身が非負)
 - 各 sub-model は **1 回ずつ** だけ呼ばれる (`mock.call_count == 1`)
 - `x` の shape は forward 中で変化しない (各 reverse step は同 shape 入出力)
 - `x.device == mel.device`, `x.dtype == mel.dtype` を全 step で維持
@@ -280,7 +310,7 @@ def reverse_sample(
 | 役割 | 人数 | 担当範囲 | 推奨 subagent_type |
 |---|---|---|---|
 | Implementer | 1 | `infer_diff.py` 実装 + `tests/test_reverse_sampler.py` 記述 | general-purpose |
-| Reviewer | 1 | docs/training.md §4.2 / docs/architecture.md §5 / DDPM 論文 Eq.11 整合性確認 | general-purpose |
+| Reviewer | 1 | docs/training.md §4.2 (x_0 予測経由 β-free 式) / docs/architecture.md §5 整合性確認 | general-purpose |
 | Tester | 1 | `uv run pytest tests/test_reverse_sampler.py -v` + mock による sub-model call_count 検証 | Explore |
 
 ### 並列度
@@ -290,13 +320,14 @@ def reverse_sample(
 ## 4. 提供範囲 (Scope)
 
 ### In Scope
-- `reverse_sample(model, mel, *, seed=None) -> Tensor` の実装
-- `_compute_ddpm_coefficients(abar) -> dict` の pure helper 実装
+- `reverse_sample(model, mel, *, seed=None, eta=1.0) -> Tensor` の実装
+- `_compute_ddpm_coefficients(abar) -> dict` の pure helper 実装 (**β-free**、x_0 予測経由式用の値のみ)
 - `@torch.no_grad()` で勾配グラフ非構築
 - seed=None → stochastic、seed=int → deterministic の切替
+- `eta` フラグ (1.0 DDPM / 0.0 DDIM) による stochasticity 切替
 - point-specialized 1-to-1 dispatch (band 判定なし)
-- 出力末尾の `clamp(-1, 1)`
-- 4-step ループの DDPM 標準形 reverse step
+- 出力末尾の `clamp(-1, 1)` + 各 step の `x0_hat.clamp(-1, 1)`
+- 4-step ループの x_0 予測経由射影式 (DDIM/DDPM 一般形、β 不使用)
 - shape 検証 (`mel.dim() == 3`、`abar.shape == (4,)`)
 - `tests/test_reverse_sampler.py` (5.1 / 5.3)
 - `__init__.py` への `__all__` 追加 + docstring (英文 + 日本語)
@@ -309,7 +340,7 @@ def reverse_sample(
 - **CLI entry point** (T-M3.5 smoke で必要なら別途、本チケットは関数のみ)
 - **mixed precision (`--amp`)** (T-M4.3 / M6.2 で評価)
 - **Batch-level seed 分離 (B 個の utterance に異なる seed)** (現実装は batch 全体で 1 seed、将来拡張)
-- **DDIM (η=0 deterministic)** (§8 代替案、必要なら別実装)
+- **β を逆算する旧式の DDPM reverse step** (構造的に発散するため不採用、§6.1 参照)
 - **post-filter の wrapper API** (T-M3.4 が `reverse_sample` 後段で適用)
 
 ### Deliverable
@@ -318,8 +349,8 @@ def reverse_sample(
   - `tests/test_reverse_sampler.py` (新規)
   - `src/wavenext2/inference/__init__.py` (re-export 追加)
 - 関数:
-  - `reverse_sample(model, mel, *, seed=None) -> Tensor`
-  - `_compute_ddpm_coefficients(abar) -> dict[str, Tensor]`
+  - `reverse_sample(model, mel, *, seed=None, eta=1.0) -> Tensor`
+  - `_compute_ddpm_coefficients(abar) -> dict[str, Tensor]` (β-free)
 - ドキュメント差分:
   - `docs/milestones.md` §M3.3 Acceptance チェック
   - `docs/tickets/index.md` の T-M3.3 ステータス
@@ -350,11 +381,12 @@ def reverse_sample(
 - [ ] `test_submodel_call_order`: mock に call order tracker を仕込み、k=0, 1, 2, 3 の順 (denoising 順 t=1→4) で呼ばれることを確認
 - [ ] `test_submodel_args`: mock の各 call で `args == (mel, x, c_t)` の形であることを assert (`c_t.shape == (B,)`)
 
-#### DDPM coefficients helper
-- [ ] `test_compute_coefficients_shapes`: `abar = torch.tensor([1e-4, 2.8e-2, 5.6e-1, 9.1e-1])` で `coef["beta"].shape == (4,)` 等
-- [ ] `test_compute_coefficients_beta_formula`: `coef["beta"][0] == 1 - 1e-4`、`coef["beta"][1] == 1 - 2.8e-2/1e-4` を assert (慣例 `ᾱ_0=1`)
-- [ ] `test_compute_coefficients_sigma_last_zero`: `coef["sigma"][3] == 0.0` (最終 step decoder-like)
+#### coefficients helper (β-free)
+- [ ] `test_compute_coefficients_shapes`: `abar = torch.tensor([1e-4, 2.8e-2, 5.6e-1, 9.1e-1])` で `coef["abar_next"].shape == (4,)`、`coef["sqrt_abar"].shape == (4,)` 等
+- [ ] `test_compute_coefficients_no_beta_key`: `"beta" not in coef and "alpha" not in coef` (β/α を一切計算しない、§6.1 CRITICAL)
+- [ ] `test_compute_coefficients_abar_next`: `coef["abar_next"][:3] == abar[1:]` (ᾱ_{t+1})、`coef["abar_next"][3] == 1.0` (最終 step は完全クリーン)
 - [ ] `test_compute_coefficients_sqrt_one_minus_abar`: `coef["sqrt_one_minus_abar"]` が `[0.99995, 0.9858, 0.6633, 0.3]` 程度 (`docs/architecture.md` §5 表と整合)
+- [ ] `test_compute_coefficients_abar_next_increasing`: 全 step で `coef["abar"][i] < coef["abar_next"][i]` (denoising 方向で ᾱ 増加 ⇒ σ² ≥ 0 の前提)
 - [ ] `test_compute_coefficients_device_inherit`: `abar` を CUDA に移したら coef の全テンソルも CUDA (`@pytest.mark.gpu`)
 
 #### Edge cases
@@ -365,9 +397,11 @@ def reverse_sample(
 - [ ] `test_model_eval_not_forced`: 本関数は `model.eval()` を呼ばない (呼び出し側責務、§6.1 参照)。`model.train()` 状態で呼んでも例外を上げず動く (sub-model に dropout がない前提で deterministic、§6.1 で再評価)
 
 #### CRITICAL safety nets (§6.1 critical 由来)
-- [ ] **`test_no_negative_beta_used`** (Critical): `β` を使わない式で reverse step が成立することを assert。`_compute_ddpm_coefficients` の戻り値に β が存在しない、または β が含まれていても reverse_sample が β を **forward path で参照しない** ことを確認。`abar = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]` で `reverse_sample` を実行して NaN/Inf が出ないこと (β 負値が NaN にならない設計の証明)
-- [ ] **`test_sigma_indexing_consistency`**: `σ_t` の index が `β_next` (= 1 つ先の遷移用 noise) と整合。論文 / FastDiff の手計算と 1 例 pin (例: `σ[0]` が `(1-ᾱ_0)/(1-ᾱ_1) · (1-α_1)` 形で計算されているか、α-based formula で確認)
-- [ ] **`test_stochastic_flag`**: `stochastic=True` (DDPM standard) と `stochastic=False` (DDIM η=0) で **異なる出力**。同 seed でも stochastic フラグが切り替われば出力が変わる
+- [ ] **`test_no_negative_beta_used`** (Critical): **β を計算しない** ことを assert。`_compute_ddpm_coefficients([1e-4, 2.8e-2, 5.6e-1, 9.1e-1])` の戻り値に `"beta"` / `"alpha"` key が存在しないこと、かつ `reverse_sample` の実装が β を **forward path で参照しない** こと。同 schedule で `reverse_sample` を実行して NaN/Inf が出ないこと (β を計算しないため `β[1]=-279` 問題が構造的に発生しないことの証明)
+- [ ] **`test_sigma_non_negative`** (Critical、新規): 論文 schedule `[1e-4, 2.8e-2, 5.6e-1, 9.1e-1]` の全 step (t=1..K-1) で `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next) ≥ 0` を `eta=1.0` で assert。`1 - ᾱ_next - σ² ≥ 0` (coef_eps の sqrt 中身) も全 step で非負。`ᾱ_t < ᾱ_next` (denoising 方向 ᾱ 増加) を前提に成立
+- [ ] **`test_sigma_indexing_consistency`**: σ² が `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)` 式で計算されることを 1 例 pin。例: `eta=1.0`, t=1 (`ᾱ_t=1e-4`, `ᾱ_next=2.8e-2`) で `σ² = (1-2.8e-2)/(1-1e-4)·(1-1e-4/2.8e-2)` を手計算値と `torch.allclose` で照合 (`ᾱ_t`/`ᾱ_next` の index 整合確認)
+- [ ] **`test_stochastic_flag`**: `eta=1.0` (DDPM) と `eta=0.0` (DDIM) で **異なる出力**。同 seed でも eta が切り替われば出力が変わる (`eta=0` は σ=0 で z 加算なし ⇒ deterministic projection)
+- [ ] **`test_eta_zero_deterministic_given_seed`**: `eta=0.0` (DDIM) は初期ノイズ以外に乱数を消費しない。同 `seed=7`, `eta=0.0` で 2 回呼んで `torch.allclose(out1, out2)` (初期 `x=randn` が seed で固定 ⇒ 射影部に z 加算がないため完全 deterministic)。`eta=1.0` 版と比較して出力が異なること (z 加算の有無)
 - [ ] **`test_seed_with_external_generator`**: `gen = torch.Generator(device).manual_seed(2025)` を外部から注入で deterministic、global RNG (`torch.initial_seed()`) は変化しない
 - [ ] **`test_eval_mode_context`**: `eval_mode(model)` context manager が `model.training` を一時的に `False` にし、`__exit__` で元に戻すこと (BatchNorm/Dropout の eval 状態確認)
 
@@ -398,78 +432,68 @@ def reverse_sample(
 
 ### 6.1 技術的リスク
 
-#### CRITICAL [最優先]: `β_t` 負値問題 (実装着手時の最重要確認事項)
-- **問題**: `NOISE_SCHEDULE_ABAR = [1.0e-4, 2.8e-2, 5.6e-1, 9.1e-1]` に対して標準 DDPM の `β_t = 1 - ᾱ_t / ᾱ_{t-1}` を **adjacent indices に直接適用すると β が負値になる**
+#### CRITICAL [✅ 解決 (2026-05-27)]: `β_t` 負値問題 → x_0 予測経由 β-free 式で構造的に解消
+- **解決ステータス (2026-05-27)**: `docs/training.md` §4.2 で reverse step が **β を使わない x_0 予測経由の DDIM/DDPM 一般形** に確定した。本チケット §2 のコード (`_compute_ddpm_coefficients` / `reverse_sample`) も同式に更新済み。**β を一切計算しないため、`β[1]=-279` 問題は構造的に発生しない**。denoising 方向で `ᾱ_t < ᾱ_next ⇒ σ² ≥ 0` が保証され、sqrt の中身が常に非負。
+- **以下は「なぜ β を使わないか」の根拠** (旧 CRITICAL の原因分析を保持):
+- **問題 (旧)**: `NOISE_SCHEDULE_ABAR = [1.0e-4, 2.8e-2, 5.6e-1, 9.1e-1]` に対して標準 DDPM の `β_t = 1 - ᾱ_t / ᾱ_{t-1}` を **adjacent indices に直接適用すると β が負値になる**
   - 計算例: `β[1] = 1 - ᾱ[1] / ᾱ[0] = 1 - 2.8e-2 / 1.0e-4 = 1 - 280 = -279`
   - 同様に `β[2] = 1 - 5.6e-1 / 2.8e-2 = 1 - 20 = -19`、`β[3] = 1 - 9.1e-1 / 5.6e-1 ≈ -0.625`
-  - **根本原因**: 論文の 4 点 schedule は **連続 DDPM schedule (通常 T=1000) のサブサンプリング** であり、`ᾱ_{t-1}` は「直前 step」ではなく「数百 step 前」の値。**adjacent indices 間の β は意味を持たない (実質 3-step skip)**
-- **影響範囲**:
-  - §2.2 擬似コードの `beta[1:] = 1.0 - abar[1:] / abar[:-1]` がそのまま動作すると β[1], β[2], β[3] が負
-  - reverse step の式 `1/√(1-β_next)` を含む箇所で `1 - β_next < 0` となり **`sqrt(負値) → NaN` 確定**
-  - 同じく `σ_t = √(β_{t+1}·(1-ᾱ_t)/(1-ᾱ_{t+1}))` でも `β_{t+1} < 0` なら `sqrt(負値) → NaN`
-  - `coef["beta"][0] = 1 - 1e-4 = 0.9999` (正値) は問題ないが、`coef["beta"][1:]` が全滅する
-- **本チケット実装着手時の最優先確認事項** (実装前に必ず手計算で 1 例 pin):
-  1. **β を使わない式で reverse step を再導出**: DDPM Eq.11 を変形すると `β_t / √(1-ᾱ_t)` と `1/√(1-β_t)` の組み合わせは `α_t = 1 - β_t = ᾱ_t / ᾱ_{t-1}` を使えば `√(ᾱ_{t-1}/ᾱ_t)` で書き直せる
-  2. `α_t = ᾱ_t / ᾱ_{t-1}` (これは β_t と違って sub-sampling でも意味あり、`α_t < 1` であれば良い)
-  3. `σ_t² = (1 - ᾱ_{t-1}) / (1 - ᾱ_t) · (1 - α_t)` を skip 認識で計算 (= `(1-ᾱ_{t-1})/(1-ᾱ_t) · β_t` だが β は不使用)
-  4. FastDiff (`Rongjiehuang/FastDiff/utils/util.py` の `compute_diffusion_params` 等) / BDDM (`tencent-ailab/bddm/sampler/sampler.py` の DDPM ブランチ) の **schedule sub-sampling 対応コード** を参照、`β` を直接計算していないことを確認
-- **修正案** (実装時):
-  - `_compute_ddpm_coefficients` で β を **計算しない** (キーから削除) OR `α_t = ᾱ_t / ᾱ_{t-1}` のみ計算し、reverse step の式を α / √ᾱ / √(1-ᾱ) のみで書き直す
-  - reverse step を `x_{t-1} = √(ᾱ_{t-1}/ᾱ_t) · (x_t - √(1-ᾱ_t)·ε) + √(ᾱ_{t-1}) · ε_corrected + σ_t · z` 形式に書き換え (BDDM 流の skip-aware DDPM)
-  - 慣例 `ᾱ_0 = 1` の解釈も再検討: t=1 (denoising 順最初) では `ᾱ_{t-1} = 1` で `α_1 = ᾱ_1 / 1 = 1e-4`、これは「ほぼ全てがノイズ」を意味し物理的整合
-- **数値検証**:
-  - β を使わない reverse step の式が `√(1-ᾱ)` と `√(ᾱ)` のみで成立することを **論文 Eq. 11 と FastDiff コードで再確認**
-  - 4 点それぞれで手計算: `α_1 = 1e-4`, `α_2 = 2.8e-2/1e-4 = 280`, `α_3 = 5.6e-1/2.8e-2 = 20`, `α_4 = 9.1e-1/5.6e-1 ≈ 1.625` ← **α > 1 もまた DDPM の前提 (`α ≤ 1`) を破る!**
-  - これは「論文 schedule そのものが連続 DDPM の sub-sampling 結果であり、adjacent transition は通常の forward process では表現できない」ことを意味する → **本実装は forward process の reverse ではなく、4 つの "denoising fixed point" を順に通過する形式 (BDDM-style 4-step skip-sampling)** で再定式化が必須
-- **検知タイミング**:
-  - **実装着手前**: 手計算 1 例で `β[1] = -279` を確認、設計を修正
-  - **T-M3.3 unit test (5.1)**: `test_no_negative_beta_used` (5.5 で追加) で β を使わない式で reverse step が成立することを assert
-  - **T-M3.5 smoke**: NaN/Inf の出現を即検知、出れば本チケット再オープン
-- **未解決のまま実装すると**: **NaN 確定** → T-M3.5 smoke で全 utterance NaN → 訓練不能 → M3 全体が停止する **重大バグ**
+  - **根本原因**: 論文の 4 点 schedule は **連続 DDPM schedule (通常 T=1000) のサブサンプリング** であり、`ᾱ_{t-1}` は「直前 step」ではなく「数百 step 前」の値。**adjacent indices 間の β は意味を持たない (実質 3-step skip)**。β を逆算した `α_t = ᾱ_t/ᾱ_{t-1}` も `α_2 = 280`, `α_3 = 20`, `α_4 ≈ 1.625` と `α > 1` になり DDPM の前提 (`α ≤ 1`) を破る
+- **採用した解決策** (`docs/training.md` §4.2):
+  - `_compute_ddpm_coefficients` は β / α / σ を **一切計算しない** (戻り値 key から削除)。`ᾱ_t`, `ᾱ_next`, `√ᾱ_t`, `√(1-ᾱ_t)` のみ返す
+  - reverse step は各 step で `x0_hat = (x - √(1-ᾱ_t)·ε) / √(ᾱ_t)` を推定し、次のクリーン側 `ᾱ_next` (最終 1.0) へ射影 `x = √(ᾱ_next)·x0_hat + √(1-ᾱ_next-σ²)·ε + σ·z`
+  - `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)`。denoising 方向で `ᾱ_t < ᾱ_next ⇒ 1-ᾱ_t/ᾱ_next ≥ 0 ⇒ σ² ≥ 0` (負値問題なし)
+  - これは「論文 schedule は連続 DDPM の sub-sampling 結果であり、adjacent transition を β で表現できない」という事実に対し、**β を経由せず x_0 推定値を skip-aware に射影する** ことで対処する (DDIM の skip-step 定式化に一致)
+- **検証 (本チケット §5)**:
+  - `test_no_negative_beta_used`: coefficients に `"beta"`/`"alpha"` key がないこと + 論文 schedule で NaN/Inf が出ないこと
+  - `test_sigma_non_negative`: 全 step で `σ² ≥ 0` かつ `1-ᾱ_next-σ² ≥ 0` を assert
+  - `test_sigma_indexing_consistency`: σ² 式の手計算値と照合
+  - **T-M3.5 smoke**: NaN/Inf の出現を即検知 (β を計算しないため発生しない想定だが、保険として残す)
 
-#### CRITICAL: `σ_t` indexing off-by-one リスク
-- **問題**: §2.2 擬似コードでは `coef["sigma"][idx]` (idx = t-1) で σ を引いているが、DDPM 原典では `σ_t` は **「次 step に向かう noise」** であり、1-indexed の `σ_{t+1}` (= 0-indexed の `σ[idx+1]`) を引く方が正しい場合がある
+#### CRITICAL: `ᾱ_t` / `ᾱ_next` indexing 整合 (β-free 式での off-by-one リスク)
+- **問題**: x_0 予測経由式では各 step で「現在 `ᾱ_t`」と「次のクリーン側 `ᾱ_next`」の 2 値を使う。0-indexed `idx = t-1` で `ᾱ_t = coef["abar"][idx]`、`ᾱ_next = coef["abar_next"][idx]` が **正しいペア** (= `ᾱ_{t+1}`、最終 step は 1.0) になっているか確認が必要
 - **混乱の根源**:
-  - 「t で sub-model を呼び、`x_{t-1}` を作る」過程で噛む σ は `σ_{t-1}` (`x_{t-1}` への注入) か `σ_t` (`x_t` から `x_{t-1}` への遷移) か論文 / 実装で異なる
-  - `coef["sigma"][idx] = σ_t` (denoising 順 t での出口)、`coef["beta"][t] = β_{t+1}` (1 つ先) で **index 規約が混在**
-- **本チケット採用**: 内部 0-indexed で `sigma[idx]` が `β_next` (= `coef["beta"][t]`) と整合するように **手計算で 1 例 pin する**
+  - σ² は `ᾱ_t` (現在) と `ᾱ_next` (1 つクリーン側) の **両方** を参照する。`abar_next[idx]` が `abar[idx+1]` (t<K) / `1.0` (t=K) に正しくマップされているか
+  - x0_hat の係数 (`√(1-ᾱ_t)`, `√ᾱ_t`) は **現在 step** の値、射影の `√(ᾱ_next)` は **次 step** の値で、混在しやすい
+- **本チケット採用**: helper が `abar_next` を明示的に構築 (`abar_next[:K-1]=abar[1:]`, `abar_next[K-1]=1.0`) し、`reverse_sample` は `coef["abar"][idx]` と `coef["abar_next"][idx]` を同じ idx で引く。**手計算で 1 例 pin** (`test_sigma_indexing_consistency`)
 - **検知タイミング**:
-  - **T-M3.5 smoke 前**: 1 utterance × 既知 seed で 1 step だけ手計算実行、`sigma[0]` と `beta[1]` (= `coef["beta"][1]`) の組み合わせが期待値と一致するか pin
-  - **T-M3.3 unit test (5.1)**: `test_sigma_indexing_consistency` (5.5 で追加) で σ_t の index が β_next と整合
+  - **T-M3.5 smoke 前**: 1 utterance × 既知 seed で 1 step だけ手計算実行、`σ²[idx=0]` が `(ᾱ_t=1e-4, ᾱ_next=2.8e-2)` の組で期待値と一致するか pin
+  - **T-M3.3 unit test (5.1)**: `test_sigma_indexing_consistency` / `test_compute_coefficients_abar_next` で整合
 - **未解決のまま実装すると**: 偶然動くが品質低下 (off-by-one が音質を間接的に劣化)、M5.2 で MCD が想定より悪い形で気付く
 
-#### CRITICAL: `reverse_step` 式の正確性 (DDPM 論文 Eq.11 と整合確認)
-- **問題**: `docs/training.md` §4.2 の擬似コードと DDPM 標準形 (Ho et al., 2020 Eq.11) の **添字対応** が実装時に混乱しやすい
-  - denoising 順 (t=1→K で純ノイズ→クリーン) と DDPM 原典の forward 順 (t=T→0) で **index の向きが逆**
-  - β_t は「前ステップ → 現ステップ」の遷移、つまり denoising 順では「次の step で使う β を取る」必要あり
+#### CRITICAL: `reverse_step` 式の正確性 (x_0 予測経由 DDIM/DDPM 一般形と整合確認)
+- **問題**: `docs/training.md` §4.2 の x_0 予測経由式と実装の **添字対応** が混乱しやすい
+  - denoising 順 (t=1→K で純ノイズ→クリーン) で `ᾱ` は **増加列**、射影先は常に「より大きい `ᾱ_next`」
+  - 最終 step は `ᾱ_next = 1` で射影項が消え `x = x0_hat` になる特殊形
 - **本チケット採用解釈** (`docs/training.md` §4.2 完全準拠):
   - `t in 1..K` (1-indexed denoising 順)
   - sub-model k=t を呼んで `eps_pred` を得る
-  - `t < K`: 通常 reverse step、`β_next = coef["beta"][t]` (= 0-indexed の `[t]`、1-indexed では `β_{t+1}`)
-  - `t == K`: 最終 step、`(x - √(1-ᾱ_K) · ε) / √ᾱ_K`
+  - `x0_hat = (x - √(1-ᾱ_t)·eps) / √(ᾱ_t)`、`clamp(-1,1)`
+  - `t < K`: `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)`、`x = √(ᾱ_next)·x0_hat + √(clamp(1-ᾱ_next-σ²,0))·eps + (η>0 なら σ·z)`
+  - `t == K`: 最終 step、`x = x0_hat` (ᾱ_next=1)
 - **検証手段**:
-  1. `test_compute_coefficients_*` で β / σ の値が論文表と整合
+  1. `test_compute_coefficients_*` で `ᾱ_next` / `√(1-ᾱ)` の値が論文表と整合
   2. `test_each_submodel_called_once` で dispatch order が正しい
-  3. M5.2 / M3.5 smoke で「生成波形が GT に近づく」ことで間接的に検証
-- **未解決のまま実装すると**: 推論で発散 (NaN) または生成波形がノイズに近い (聴感破綻)、M3.5 / M5.2 で検知
+  3. `test_sigma_non_negative` で全 step `σ² ≥ 0` (β-free 式の正当性)
+  4. M5.2 / M3.5 smoke で「生成波形が GT に近づく」ことで間接的に検証
+- **未解決のまま実装すると**: 生成波形がノイズに近い (聴感破綻)、M3.5 / M5.2 で検知
 
-#### CRITICAL: `sigma_t` の選択 (DDPM 標準 vs DDIM η=0)
-- **問題**: DDPM 標準 `σ_t² = β_t · (1-ᾱ_{t-1}) / (1-ᾱ_t)` と DDIM `η=0` (`σ_t = 0` で deterministic) の **どちらを採用するか**
-- **本チケット採用**: **DDPM 標準形** (`docs/training.md` §4.2 完全準拠)
-  - 中間 step (t=1..K-1) は `σ_t = √(β_{t+1}·(1-ᾱ_t)/(1-ᾱ_{t+1}))`
-  - 最終 step (t=K) のみ `σ = 0` (decoder-like deterministic)
-- **代替**: DDIM (η=0、全 step deterministic) は §8.1 案に残す、`stochastic: bool` 引数で切替可能化を将来検討
-- **検知**: M3.5 smoke で reverse sample 品質が低い場合、DDIM 切替で再評価
+#### CRITICAL: `eta` の選択 (DDPM η=1 vs DDIM η=0)
+- **問題**: x_0 予測経由式の `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)` で η をいくつにするか
+- **本チケット採用**: **`eta=1.0` (DDPM、確率的) を default**、`eta=0.0` (DDIM、決定論的) を引数で切替可能 (`docs/training.md` §4.2 / §8.1 v1 採用)
+  - 中間 step (t=1..K-1) で η>0 のとき `σ·z` を加算、η=0 なら射影のみ (deterministic)
+  - 最終 step (t=K) は `ᾱ_next=1` で `σ²=0` (η に依らず deterministic、`x=x0_hat`)
+- **検知**: M3.5 smoke で reverse sample 品質を `eta=1.0` / `eta=0.0` で比較、4-step では DDIM の方が安定する場合あり
 
 #### CRITICAL: `c_t = sqrt(1 - abar[t-1])` の index 計算 (1-indexed vs 0-indexed)
 - **問題**: 仕様セクションの擬似コード `c_t = sqrt(1 - abar[t-1])` と本実装の `c_t = coef["sqrt_one_minus_abar"][idx]` (idx = t-1) は同じ値だが、**実装時に 1-indexed/0-indexed の混乱** で off-by-one リスク
 - **本チケット採用**: 内部は 0-indexed `idx = t - 1` で統一、コメントで 1-indexed t との対応を必ず明示
 - **検証手段**: `test_compute_coefficients_sqrt_one_minus_abar` で `[0.99995, 0.9858, 0.6633, 0.3]` 表と整合確認
 
-#### CRITICAL: 4-step すべて stochastic vs 最終 step は deterministic にするか
-- **問題**: 「最終 step は σ=0 (deterministic decode)」(`docs/training.md` §4.2) という仕様と、「同じ seed で deterministic」(Acceptance) が **両立するか**
-- **本チケット採用**: **最終 step のみ deterministic** (σ_K=0)、中間 step は σ·z で stochastic。seed=int の場合、Generator local 化により stochastic step も再現可能 → Acceptance 「同 seed deterministic」と矛盾しない (seed が乱数 sequence を fix するため)
-- **検証**: `test_same_seed_deterministic` で 2 回呼び同じ出力、`test_different_seed_different_output` で異なる seed で異なる出力
+#### CRITICAL: 中間 step stochastic vs 最終 step deterministic (eta との両立)
+- **問題**: 「最終 step は `ᾱ_next=1` で `σ²=0` (deterministic、`x=x0_hat`)」(`docs/training.md` §4.2) という仕様と、「同じ seed で deterministic」(Acceptance) が **両立するか**
+- **本チケット採用**: `eta=1.0` のとき **中間 step (t<K) のみ `σ·z` で stochastic**、最終 step は構造的に deterministic。`eta=0.0` なら全 step deterministic (DDIM)。seed=int の場合、Generator local 化により stochastic step も再現可能 → Acceptance 「同 seed deterministic」と矛盾しない (seed が乱数 sequence を fix するため)
+- **検証**: `test_same_seed_deterministic` で 2 回呼び同じ出力、`test_different_seed_different_output` で異なる seed で異なる出力、`test_eta_zero_deterministic_given_seed` で `eta=0` の決定性
 
 #### CRITICAL: `model.eval()` モード切替の責務
 - **問題**: 本関数が `model.eval()` を内部で呼ぶか、呼び出し側に委ねるか
@@ -519,11 +543,13 @@ def reverse_sample(
   - **DDPM 標準形**: ✅ `x_t = √ᾱ_t · x_0 + √(1-ᾱ_t) · ε` (PDF Fig 1b 画像確認、§A5)
   - **4-step noise schedule**: ✅ `ᾱ = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]` (PDF §3.3、§A5)
   - **point-specialized 1-to-1 dispatch**: ✅ Table 1 のパラメータ数 57.68M=14.42M×4 から確定 (§B1)
-  - **Diff reverse step (DDPM 形式)**: ✅ BDDM `bddm/sampler/sampler.py` DDPM ブランチ準拠 (§B3)
+  - **Diff reverse step**: ✅ **x_0 予測経由 DDIM/DDPM 一般形 (β-free)** に確定 (`docs/training.md` §4.2、2026-05-27)。β を逆算する旧式は denoising 順 ᾱ 増加列で発散するため不採用 (§6.1)
   - **post-filter は本チケットで適用しない**: ✅ docs/milestones.md §M3.3 / §M3.4 で分離
 - 本チケット内での決定:
   - **`seed: int | None = None` (keyword-only)**: stochastic と deterministic を seed 引数 1 つで切替 (`Optional[int]` で揃える)
-  - **最終 step σ=0 (deterministic decode)**: `docs/training.md` §4.2 完全準拠
+  - **`eta: float = 1.0`**: stochasticity フラグ (1.0 DDPM / 0.0 DDIM)、`docs/training.md` §4.2 / §8.1 v1 採用
+  - **β を一切計算しない**: x_0 予測経由式で構造的に σ² ≥ 0 (§6.1 解決済み)
+  - **最終 step は `ᾱ_next=1` で `x=x0_hat` (deterministic)**: `docs/training.md` §4.2 完全準拠
   - **`@torch.no_grad()` で wrap**: 推論専用、勾配グラフ非構築
   - **`model.eval()` 呼び出しは呼び出し側責務**: 副作用回避
 
@@ -556,10 +582,11 @@ def reverse_sample(
 
 実装完了後、Reviewer が以下を確認:
 
-- [ ] `docs/training.md` §4.2 の擬似コード (1-indexed denoising 順 t=1..K, β_next, σ_t, 最終 step) と整合
+- [ ] `docs/training.md` §4.2 の擬似コード (1-indexed denoising 順 t=1..K, x0_hat → 射影, ᾱ_next, σ², eta, 最終 step) と整合
+- [ ] **β / α を一切計算していない** (helper 戻り値・forward path とも)、x_0 予測経由式のみ (§6.1 CRITICAL)
 - [ ] `docs/architecture.md` §5 の point-specialized 1-to-1 dispatch (k=t) と整合
 - [ ] `docs/open-questions.md` §A5 / §B1 / §B3 (DDPM 標準形、4-step schedule、reverse step) と整合
-- [ ] DDPM 原典 (Ho et al., 2020 Eq.11) と式が一致 (σ_t² = β_t · (1-ᾱ_{t-1}) / (1-ᾱ_t))
+- [ ] σ² 式が `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)` と一致、denoising 方向で `σ² ≥ 0`
 - [ ] Acceptance criteria 全項目クリア (5.3 / 5.4)
 - [ ] Unit テスト全 pass、特に mock による `call_count == 1` 検証
 - [ ] CLAUDE.md スタイル準拠 (型ヒント、docstring 英文 + 日本語、`from __future__ import annotations`、`*` で keyword-only)
@@ -580,7 +607,7 @@ def reverse_sample(
 ### 8.1 別の設計を採るとしたら
 
 #### 採用設計
-- **`reverse_sample(model, mel, *, seed=None, stochastic=True)` の 1 関数 + `_compute_ddpm_coefficients` pure helper + `eval_mode` context manager helper、DDPM 標準形 4-step + 1-to-1 dispatch + 最終 step σ=0**
+- **`reverse_sample(model, mel, *, seed=None, eta=1.0)` の 1 関数 + `_compute_ddpm_coefficients` pure helper (β-free) + `eval_mode` context manager helper、x_0 予測経由 DDIM/DDPM 一般形 4-step + 1-to-1 dispatch + 最終 step `x=x0_hat`**
   - 理由:
     - (a) 1 関数で `from wavenext2.inference.infer_diff import reverse_sample` の唯一のエントリポイント、T-M3.4 / T-M3.5 / T-M4.3 が薄い wrapper で済む
     - (b) `_compute_ddpm_coefficients` を pure helper として切り出すことで unit test が容易 (式の正確性を mock 不要で検証可能)
@@ -588,15 +615,14 @@ def reverse_sample(
     - (d) `@torch.no_grad()` で勾配グラフ非構築、推論専用
     - (e) `seed: int | torch.Generator | None = None` で stochastic / deterministic / external generator 注入の 3 形式を 1 引数切替、global RNG 非汚染
     - (f) 最終 step σ=0 は `docs/training.md` §4.2 完全準拠 (DDPM 原典は通常 σ_t を全 step 適用するが、4-step BDDM 風では最終 step decoder-like が慣例)
-    - (g) **`stochastic: bool = True` を v1 化**: 4-step (K=4) の reverse process では中間 σ·z の stochasticity が品質を主導するため、DDPM 標準 (True) と DDIM η=0 (False) の両方を default 実装し、CLI で切替可能化 (M3 phase review 結果、§8.1 採用昇格)
+    - (g) **`eta: float = 1.0` を v1 化** (旧 `stochastic: bool` を float 一般化): 4-step (K=4) の reverse process では中間 σ·z の stochasticity が品質を主導するため、DDPM (`eta=1.0`) と DDIM (`eta=0.0`) の両方を 1 引数で default 実装し、CLI で切替可能化 (M3 phase review 結果、§8.1 採用昇格)。x_0 予測経由式では σ² が eta² に比例するため float 連続値で η∈[0,1] の中間も表現可能
     - (h) **`@contextmanager def eval_mode(model)` helper** を切り出し、`reverse_sample` 内で常時使用 (副作用なし、`model.train(prev_training)` で復元、`prev_training = model.training; model.eval(); yield; model.train(prev_training)`)。T-M3.4 / T-M3.5 / T-M4.3 が全部 `model.eval()` を書く重複を避ける (M3 phase review 結果)
 
 #### 検討追加 (M3 phase review 結果)
 
-- **`variance_type: Literal["small", "large"] = "small"`**: Ho 2020 では `σ_t² = β_t` (large variance、DDPM 原典の simple version) と `σ_t² = β_t·(1-ᾱ_{t-1})/(1-ᾱ_t)` (small variance、IDDPM 形式) の 2 種比較あり
-  - 論文 §3.3 では ambiguous (具体的な σ_t² の形式は明記なし)
-  - **本チケット v1**: small variance を default (`docs/training.md` §4.2 採用)、`variance_type` 引数を将来追加可能化
-  - **再評価タイミング**: M3.5 smoke 後の品質確認時、large vs small で MCD / UTMOS 比較
+- **`variance_type` (将来検討)**: 本チケット v1 は x_0 予測経由式の `σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next)` (DDIM 流の skip-aware small variance) を採用
+  - 論文 §3.3 では σ² の具体形式は明記なし。β-free 式は β を逆算しないため Ho2020 の `σ²=β_t` (large) 形式は **そもそも計算不能** (β が負値)。large variant が必要なら別途 σ² 式を差し替える
+  - **再評価タイミング**: M3.5 smoke 後の品質確認時、必要なら η 以外の σ² 形式を実験
 
 - **`seed: int | torch.Generator | None = None` に拡張**: int 1 つだけでなく外部から `torch.Generator` を注入可能化
   - **理由**: M3.4 post-filter fit (200 utterance) と T-M4.3 RTF (warmup 含む反復測定) で **global RNG を汚染しない** ため、外部 Generator を注入したい
@@ -605,10 +631,9 @@ def reverse_sample(
 
 #### Deprecated (却下案)
 
-1. **DDIM (η=0、全 step deterministic)**
-   - メリット: 推論が完全に deterministic (seed 不要)、stochastic 性の不要な評価で品質安定
-   - 却下: 論文 §3.3 / Fig 3 は BDDM ベースで DDPM 標準形を採用、DDIM への変更は **論文外**
-   - **採用代替**: `stochastic: bool = True` 引数を追加、`False` のとき全 step σ=0 にする選択肢、§8 検討 (M6.3 ablation 時)
+1. **DDIM (η=0、全 step deterministic) — ✅ v1 で `eta=0.0` として in-scope 化**
+   - メリット: 推論が (初期ノイズを除き) deterministic、4-step では DDPM より安定する場合あり
+   - 当初は「論文外」として却下していたが、`docs/training.md` §4.2 の x_0 予測経由式は η パラメータで DDPM (η=1) / DDIM (η=0) を **同一式で表現** できるため、`eta: float = 1.0` の一部として v1 採用 (default は DDPM の η=1.0、論文準拠)
 
 2. **4 step 以外の step 数 (8 / 16 / 32)**
    - メリット: 多 step で品質向上の可能性 (FastDiff / DDPM-1000 等)
@@ -661,7 +686,7 @@ def reverse_sample(
 #### 再評価トリガー条件
 | 設計判断 | 再評価タイミング | 想定変更 |
 |---|---|---|
-| DDPM 標準形 vs DDIM | M5.2 smoke 発散時 | 品質低下なら `stochastic: bool = True` 引数で DDIM 切替 |
+| DDPM vs DDIM | M5.2 smoke 発散時 | 品質低下なら `eta=0.0` (DDIM) に切替 (v1 で引数化済み) |
 | 4-step 固定 | M6.3 ablation | 8/16/32 step で品質比較 |
 | `@torch.no_grad()` vs `@torch.inference_mode()` | T-M4.3 RTF 測定時 | inference_mode で 5%+ 速度向上が見られたら変更 |
 | `force_eval` 引数 | M6.2 訓練後の推論時 | 事故が起きたら追加 |
@@ -743,7 +768,7 @@ def reverse_sample(
   - `model.eval()` を **必ず呼ぶ** か `eval_mode(model)` context manager を使う (本関数は内部で呼ばない、§6.1 critical)
   - `seed=42` で deterministic、`seed=None` で stochastic 性確認
   - 1 utterance × 1000 step 訓練後の reverse sample が GT に近づくことを確認 (milestones.md §M3.5)
-  - `stochastic=True/False` で品質比較 (DDPM vs DDIM η=0)、smoke 内で両方走らせて MR-STFT loss を pin (M3 phase review)
+  - `eta=1.0` / `eta=0.0` で品質比較 (DDPM vs DDIM)、smoke 内で両方走らせて MR-STFT loss を pin (M3 phase review)
 
 #### T-M4.3 (RTF measurement) へ
 - **使用方法 (M3 phase review: `model.synthesize` で GAN/Diff 横断統一)**:
@@ -795,7 +820,7 @@ def reverse_sample(
   - **`@torch.inference_mode()` への変更** (T-M4.3 RTF 測定時に判断): 5%+ 速度向上があれば変更
   - **batch ごとに別 seed** (M6.2 batch 推論時に判断): 必要性が出たら `seed: int | list[int]` に拡張
 - **将来検討事項** (§8.1 再評価トリガー表参照):
-  - DDPM 標準形 vs DDIM (M5.2 smoke 発散時) — `stochastic: bool` を v1 採用済みなので CLI 切替可能
+  - DDPM vs DDIM (M5.2 smoke 発散時) — `eta: float` を v1 採用済みなので CLI 切替可能 (eta=1.0/0.0)
   - 4-step 以外の step 数 (M6.3 ablation)
   - `force_eval` 引数追加 (M6.2 訓練後の推論時) — `eval_mode` context manager を v1 採用済み
   - `clip_output` 引数追加 (T-M3.4 実装時)

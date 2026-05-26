@@ -247,70 +247,68 @@ y_0 = y_t                                    # 最終出力 (clip(-1, 1) は sub
 - 反復数 T は 2〜5 を実験で比較 (Table 1)
 - 推奨は **T = 4** (品質と速度のバランス、論文の MOS 結果より)
 
-### 4.2 Diff-WaveNeXt 2 (BDDM reverse step、DDPM 標準形、point-specialized dispatch)
+### 4.2 Diff-WaveNeXt 2 (DDIM/DDPM 一般形、x_0 予測経由、point-specialized dispatch)
 
-論文の 4 値は **ᾱ_t (cumulative)** として直接解釈 (PDF §3.3 本文・[Okamoto21] 規約に従う)。β_t は隣接 ᾱ_t から逆算。reverse step は BDDM の `bddm/sampler/sampler.py` DDPM ブランチに基づく。
+論文の 4 値は **ᾱ_t (cumulative noise level)** として直接解釈する。
+
+> **【CRITICAL】β を逆算してはならない**
+> 論文の schedule は denoising 順 (t=1 純ノイズ → t=4 クリーン) で ᾱ が **増加列** `[1e-4, 2.8e-2, 5.6e-1, 9.1e-1]`。標準 DDPM の `β_t = 1 - ᾱ_t/ᾱ_{t-1}` を隣接点に適用すると `β[1] = 1 - 2.8e-2/1e-4 = -279`、`β[2] = -19`、`β[3] = -0.625` と **負値**になり、`α = 1-β > 1` で reverse step が発散する。これは論文の 4 点が連続 DDPM schedule の **3-step サブサンプリング**であり、隣接点間の β が物理的意味を持たないため。
+>
+> **正しい reverse step は β を一切使わず、`ε_θ` から x_0 を推定して次のクリーン側 ᾱ へ射影する DDIM/DDPM 一般形 (skip-aware sampling)** を用いる。
 
 **Dispatch は 1-to-1**: 推論順 t=1→4 で sub-model 1→4 を順に呼ぶ。
 
 ```python
 # 論文の 4-step schedule: ᾱ_t = cumulative noise level (denoising 順 t=1..4)
-abar = torch.tensor([1.0e-4, 2.8e-2, 5.6e-1, 9.1e-1])   # ᾱ_1..ᾱ_4
-K = len(abar)  # = 4
+abar = torch.tensor([1.0e-4, 2.8e-2, 5.6e-1, 9.1e-1])   # ᾱ_1..ᾱ_4 (denoising 順、ᾱ は増加)
+K = len(abar)                                            # = 4
+eta = 1.0   # 1.0: DDPM (確率的) / 0.0: DDIM (決定論的)。T-M3.3 で stochastic フラグとして切替可能
 
-# β を逆算:  ᾱ_t = ᾱ_{t-1} * (1 - β_t)
-#           ⇒ β_t = 1 - ᾱ_t / ᾱ_{t-1}    (t >= 2)
-#           ⇒ β_1 = 1 - ᾱ_1                (慣例: ᾱ_0 = 1)
-beta = torch.zeros(K)
-beta[0] = 1.0 - abar[0]
-for t in range(1, K):
-    beta[t] = 1.0 - abar[t] / abar[t-1]
+x = torch.randn(B, T_audio)                              # 純ノイズから開始 (ᾱ=1e-4 side)
+for t in range(K):                                        # t = 0..3 (0-indexed)
+    abar_t    = abar[t]                                   # current (noise side)
+    abar_next = abar[t + 1] if t < K - 1 else 1.0         # next (cleaner side)、最終は完全クリーン ᾱ=1
+    c_t = torch.sqrt(1.0 - abar_t)                        # noise level conditioning √(1-ᾱ_t)
 
-sqrt_abar = torch.sqrt(abar)
-sqrt_one_minus_abar = torch.sqrt(1.0 - abar)
+    eps_pred = sub_model[t](mel, x, c_t.expand(B))        # point-specialized 1-to-1 (sub-model t+1)
 
-# 後方分散 σ_t (BDDM/DDPM 形式、t=1 は σ=0)
-# 注意: 推論順 t=1..4 (t=1 が純ノイズ、t=4 が目標) で t=4 が σ=0 (最後のステップ)
-sigma = torch.zeros(K)
-for t in range(K - 1):
-    sigma[t] = torch.sqrt(beta[t+1] * (1.0 - abar[t]) / (1.0 - abar[t+1])) if abar[t+1] < 1 else torch.tensor(0.0)
-sigma[K-1] = 0.0  # 最後のステップ (t=4) は decoder のように決定論的
+    # 1. x_0 を推定 (β 不使用)
+    x0_hat = (x - torch.sqrt(1.0 - abar_t) * eps_pred) / torch.sqrt(abar_t)
+    x0_hat = x0_hat.clamp(-1.0, 1.0)                      # 波形は [-1, 1] (任意)
 
-# 推論ループ (denoising direction: t=1 (純ノイズ) → t=4 (ほぼクリーン))
-x = torch.randn(B, T_audio)
-for t in range(K):
-    c_t = sqrt_one_minus_abar[t]                          # noise level conditioning
-    k = t + 1                                              # sub-model 1-indexed, point-specialized 1-to-1
-
-    eps_pred = sub_model[k](mel, x, c_t.expand(B))
-
-    # DDPM 標準 reverse step (next ᾱ to denoise toward)
-    # x_{t+1} を導出 (推論順での次ステップ)
     if t < K - 1:
-        # 通常の DDPM step using β_{t+1}
-        beta_next = beta[t+1]
-        x = (1.0 / torch.sqrt(1.0 - beta_next)) * (
-            x - (beta_next / sqrt_one_minus_abar[t]) * eps_pred
-        )
-        x = x + sigma[t] * torch.randn_like(x)
+        # 2. 次のクリーン側 ᾱ_next へ射影 (DDIM/DDPM 一般形)
+        #    σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1 - ᾱ_t/ᾱ_next)
+        #    denoising 方向で ᾱ_t < ᾱ_next ⇒ ᾱ_t/ᾱ_next < 1 ⇒ σ² ≥ 0 (負値問題なし)
+        sigma2   = eta ** 2 * (1.0 - abar_next) / (1.0 - abar_t) * (1.0 - abar_t / abar_next)
+        coef_eps = torch.sqrt(torch.clamp(1.0 - abar_next - sigma2, min=0.0))
+        x = torch.sqrt(abar_next) * x0_hat + coef_eps * eps_pred
+        if eta > 0:
+            x = x + torch.sqrt(sigma2) * torch.randn_like(x)
     else:
-        # 最終ステップ: ε で完全に denoise
-        x = (x - sqrt_one_minus_abar[t] * eps_pred) / sqrt_abar[t]
+        # 3. 最終ステップ: 完全クリーン (ᾱ_next = 1) なので x_0 推定値がそのまま出力
+        x = x0_hat
 
 y_0 = post_filter(x)
 ```
 
 **実装注意**:
-- 上記は DDPM 標準形のシンプルな解釈。BDDM 公式実装 (`bddm/sampler/sampler.py`) の DDPM ブランチでは index 規約が異なる場合があるため、実装時は両方を試して品質を確認すること
+- **β を逆算してはならない** (上記 CRITICAL 参照)。`x0_hat` 経由の射影式を使う
+- `eta` で stochasticity を制御: `eta=1.0` が DDPM (確率的)、`eta=0.0` が DDIM (決定論的)。論文は確率的想定だが、4-step では DDIM の方が安定する場合があるため両方を実験で比較 (T-M3.3 §8.1 で `stochastic: bool` として切替)
+- `abar_t < abar_next` (denoising 方向で ᾱ 増加) を必ず assert し、`1 - abar_t/abar_next ≥ 0` (σ² ≥ 0) を保証
 - `t` index と `√(1-ᾱ)` 値の整合性チェックを必ず実施 (high noise → low noise の denoising 方向)
 
 #### 数式 (LaTeX)
 $$
-x_{t-1} = \frac{1}{\sqrt{1-\beta_t}}\left(x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\,\epsilon_\theta(x_t, c, t)\right) + \sigma_t z,\quad z\sim\mathcal{N}(0,I)
+\hat{x}_0 = \frac{x_t - \sqrt{1-\bar{\alpha}_t}\,\epsilon_\theta(x_t, c_t)}{\sqrt{\bar{\alpha}_t}}
 $$
 $$
-\sigma_t^2 = \beta_t \cdot \frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t},\quad \sigma_0 = 0
+x_{\text{next}} = \sqrt{\bar{\alpha}_{\text{next}}}\,\hat{x}_0 + \sqrt{1-\bar{\alpha}_{\text{next}}-\sigma_t^2}\,\epsilon_\theta + \sigma_t z,\quad z\sim\mathcal{N}(0,I)
 $$
+$$
+\sigma_t^2 = \eta^2\cdot\frac{1-\bar{\alpha}_{\text{next}}}{1-\bar{\alpha}_t}\left(1 - \frac{\bar{\alpha}_t}{\bar{\alpha}_{\text{next}}}\right),\quad \bar{\alpha}_t < \bar{\alpha}_{\text{next}}\ \text{(denoising 方向)}
+$$
+（最終ステップは $\bar{\alpha}_{\text{next}} = 1$ で $x = \hat{x}_0$）
 
 #### 推論 schedule の sub-model 割り当て (point-specialized 1-to-1)
 論文の 4 値での `√(1-ᾱ_t)` と sub-model 割り当て (denoising 方向 t=1..4):
