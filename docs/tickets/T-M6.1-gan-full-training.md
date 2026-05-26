@@ -1,0 +1,376 @@
+---
+id: T-M6.1
+title: GAN-WaveNeXt 2 フル訓練 (A100 約 410h、2M step)
+milestone: M6
+phase: M6
+status: pending
+size: L
+owner: -
+created: 2026-05-26
+updated: 2026-05-26
+depends_on: [T-M5.1]
+blocks: [T-M6.3, T-M7.1]
+related_docs:
+  - docs/milestones.md#m61-gan-wavenext-2-フル訓練
+  - docs/training.md
+---
+
+# T-M6.1: GAN-WaveNeXt 2 フル訓練 (A100 約 410h、2M step)
+
+> **マイルストーン**: [M6](../milestones.md#m6-本格訓練-claude-code-は起動監視のみ-wall-clock-a100-で約-442-時間) / **サブタスク**: [M6.1](../milestones.md#m61-gan-wavenext-2-フル訓練)
+> **依存**: [T-M5.1](T-M5.1-gan-1epoch.md) (前提: [T-M2.5](T-M2.5-train-gan.md), [T-M4.1](T-M4.1-objective-metrics.md), [T-M4.3](T-M4.3-rtf.md)) / **後続**: [T-M6.3](T-M6.3-ablation.md), [T-M7.1](T-M7.1-mos-test.md)
+
+## 1. タスク目的とゴール
+
+### 目的
+T-M5.1 の **divergence gate** (1 epoch ≈ 33k step、loss 方向条件 + finite + NaN なし) を通過し **user が GO を出した** `configs/gan_wavenext2_1epoch.yaml` の最適 config を **そのまま max_steps=2M に拡張**して、GAN-WaveNeXt 2 を **A100 単体で約 410 時間 (2M step) フル訓練**し、論文 Table 1〜3 と対比可能な品質の `checkpoints/gan/best.pt` を得る。
+
+本チケットは **新規実装ゼロ** (既存 `train_gan.py` を起動するだけ) を原則とし、唯一の例外として **RTF 測定 (T-M4.3) のために `GANWaveNext2.synthesize(mel)` alias を本格訓練起動前に T-M2.4 へ実装する** (§9 cross-ticket)。Claude Code は訓練の **起動・長時間監視・自動 resume・checkpoint ごとの validation・best 更新** を担い、品質判定 (論文 Table 対比) と最終成果物の確定を行う。**GPU 確保・課金・SSH・M5.1 gate の GO/NO-GO 承認は user 操作** (§9.3)。
+
+T-M5.1 が「発散しないか」だけを見た gate であったのに対し、本チケットは初めて **品質 (UTMOS / NISQA / MCD / log F0 RMSE / RTF)** を論文と対比する。ただし backend 差により絶対値の一致は期待せず、**相対比較主軸** (T-M4.1 §8.2) で合否を判断する。
+
+### ゴール
+完了したと判断できる具体的な状態 (`docs/milestones.md` §M6.1 Acceptance を内包):
+- [ ] 既存 `train_gan.py` を `configs/gan_wavenext2.yaml` (max_steps=2M, validation/checkpoint on) で **`run_in_background=true` で起動**し、**2M step 完走 (or early stop)**
+- [ ] validation MR-STFT loss が **プラトー** (収束曲線が右肩下がりから平坦に遷移、移動平均の傾きが閾値以下)
+- [ ] 客観評価 (`evaluate()` facade、full 4824 utt): **UTMOS / NISQA / MCD / log F0 RMSE が論文 Table 1〜3 と概ね一致 (±10%)**、ただし **backend 差を考慮した相対比較主軸** (GT≈0 / GAN < Diff 等の順序関係、T-M4.1 §8.2)
+- [ ] **RTF が論文と一致** (`GANWaveNext2(T=4)` で **GPU 0.0066 / CPU 0.20**、`measure_rtf` を A100 + 1-core CPU で測定、§5)
+- [ ] divergence (NaN) / OOM / GPU preemption を検知したら **最新 checkpoint から完全 state 復元で自動 resume** (optimizer/scheduler/step/RNG)
+- [ ] checkpoint 保存ごとに validation を `evaluate()` で実行し、MR-STFT 最小で `best.pt` を **atomic rename** 更新 (T-M2.4 申し送り)
+- [ ] **`GANWaveNext2.synthesize(mel)` alias** (RTF 測定で必要) が T-M2.4 に実装され、`getattr(model, "synthesize", model.forward)` dispatch で動作 (本格訓練起動前、§9 cross-ticket)
+- [ ] 評価結果が `eval_results/gan_full.json` に永続化 (論文 Table 対比時の再計算回避)、TensorBoard ログ / checkpoint が cloud (S3/GCS) に sync
+- [ ] `docs/milestones.md` §M6.1 Acceptance 4 項目クリア、`docs/tickets/index.md` の T-M6.1 ステータス更新
+
+## 2. 実装内容の詳細
+
+### 2.1 対象ファイル
+- 新規:
+  - (原則なし。本チケットは既存 `train_gan.py` の起動・監視が本体)
+  - (任意) `scripts/sync_checkpoints.sh` (S3/GCS への checkpoint / TensorBoard ログ rsync、cron or save hook から呼ぶ薄い wrapper、§6.1)
+- 編集:
+  - `configs/gan_wavenext2.yaml` (T-M2.5 で生成済の本番 config に、T-M5.1 で確定した最適 hyperparameter を反映: eps / segment_length / D update 比 / batch / amp / `auto_oom_fallback`。max_steps=2M は据え置き)
+  - `src/wavenext2/models/gan_wavenext2.py` (**T-M2.4 への cross-ticket**: `synthesize(mel)` alias を本格訓練起動前に追加。本チケットでは「未実装なら T-M2.4 にフィードバックして追加させる」)
+  - `docs/milestones.md` §M6.1 Acceptance チェックボックス更新
+  - `docs/tickets/index.md` T-M6.1 ステータス更新 + M6 フェーズレビューログ行
+
+> **重要 (DRY)**: 訓練ロジックは T-M2.5 `train_gan.py` を **そのまま** 使う (新規 train コードを書かない)。評価は T-M4.1 `evaluate()` facade を呼ぶだけ。T-M5.1 で pass した `gan_wavenext2_1epoch.yaml` の差分を本番 `gan_wavenext2.yaml` に取り込み、max_steps だけ 2M にする。本チケットの新規ファイルは「cloud sync の薄い script」に限定する。
+
+### 2.2 主要構造
+
+#### 訓練起動 (既存 CLI、新規コードなし、background 実行)
+```bash
+# 2M step フル訓練 (validation/checkpoint 10k step ごと)。run_in_background=true で起動
+uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml
+# divergence / OOM / preemption 時は latest checkpoint から完全 state 復元で自動 resume
+uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml --resume checkpoints/gan/step_1500000.pt
+# divergence (NaN) 復帰時は lr 半減 / eps=1e-5 / AMP 無効化を config 側で調整して resume (§6.1)
+uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2_recover.yaml --resume checkpoints/gan/step_1500000.pt
+```
+
+#### RTF 測定で必要な `synthesize(mel)` alias (T-M2.4 cross-ticket、§9)
+```python
+# src/wavenext2/models/gan_wavenext2.py に追加 (本格訓練起動前)
+class GANWaveNext2(nn.Module):
+    ...
+    @torch.no_grad()
+    def synthesize(self, mel: torch.Tensor) -> torch.Tensor:
+        """RTF 測定 / 評価用の単一引数合成 alias.
+
+        forward(mel, audio_length) の audio_length=None auto-infer 版。
+        measure_rtf (T-M4.3) が getattr(model, "synthesize", model.forward) で
+        引数 1 個 (synth(mel)) で呼ぶため、第 2 引数必須の forward では TypeError になる。
+        """
+        return self.forward(mel, audio_length=None)
+```
+
+#### `evaluate()` facade による full 4824 utt 評価 (T-M4.1 §9.1 推奨 entry point)
+```python
+# scripts/eval_gan_checkpoint.py (T-M5.1 で作成済の薄い driver を full set に向ける)
+def main() -> None:  # Windows spawn 対策で if __name__ ガード下から
+    G = GANWaveNext2.from_config(cfg["model"])
+    G.load_state_dict(torch.load("checkpoints/gan/best.pt", map_location="cpu")["G_state_dict"])
+    G.eval()
+    test_ds = LibriTTSRDataset(cfg["data"]["test_filelist"], mode="val")  # test-clean 4824 utt
+    result: EvalResult = evaluate(
+        G, test_ds,
+        metrics=["mcd", "log_f0_rmse", "mrstft", "utmos", "nisqa"],
+        post_filter=None,          # GAN は post-filter 不要
+        seed=43,
+        save_to="eval_results/gan_full.json",
+    )
+    print(result.summary)          # 論文 Table 1〜3 と相対比較 (T-M4.1 §8.2)
+
+# RTF は GT 不要 (model のみ)。measure_rtf を A100 GPU + 1-core CPU で別途
+from wavenext2.eval.measure_rtf import measure_rtf
+rtf_gpu = measure_rtf(G, mels_100, device="cuda", n_measure=100)   # 論文 GPU 0.0066 対比
+rtf_cpu = measure_rtf(G, mels_100, device="cpu",  n_measure=100)   # 論文 CPU 0.20 対比 (OMP_NUM_THREADS=1)
+```
+
+### 2.3 使用するハイパーパラメータ / 定数
+
+| 名前 | 値 | 出典 |
+|---|---|---|
+| `max_steps` | **2,000,000** | docs/implementation-plan.md §5 / T-M2.5 §2.3 |
+| wall-clock 見積もり | **A100 単体で約 410 時間** | docs/milestones.md §M6.1 |
+| `batch_size` | 16 (OOM 時 8、§6.1) | T-M2.5 §2.3 / T-M5.1 で確定 |
+| `segment_length` | 16384 (T-M5.1 で high-res STFT 項を見て確定、24576 もありうる) | T-M2.1 §2.3 (SoT: GAN=16384) / T-M5.1 §8.3 |
+| `hop_length` / `n_fft` / `win_length` | 300 / 2048 / 1200 | docs/architecture.md / T-M1.6 |
+| lr_g / lr_d / betas / wd | 1e-4 / 2e-4 / [0.8,0.99] / 1e-3 | T-M2.5 §2.3 |
+| scheduler | InverseLR (inv_gamma=200000, power=0.5, warmup=0.999) | T-M2.5 §2.3 |
+| grad_clip_norm | 1.0 (NaN 復帰時も維持、§6.1) | T-M2.5 §2.3 |
+| mel eps | 1e-7 or 1e-5 (T-M5.1 §8.3 で確定したもの) | T-M1.3 §2.3 / T-M5.1 |
+| D update 比 | 1:1 or 1:2 (T-M5.1 §8.3 で確定したもの) | T-M2.5 §8.1 / T-M5.1 |
+| validation.interval_steps | 10000 (2M step 中 ~200 回) | T-M2.5 §2.3 |
+| checkpoint.interval_steps | 10000 (`keep_last_n=5`、best.pt 除外) | T-M2.5 §2.3 |
+| validation.num_utterances | 100 (訓練中 validation)、4824 (完走後 full eval) | T-M2.5 §2.3 / docs/milestones.md §M6.1 |
+| amp | fp32 default、OOM 時 `--amp` (bf16)、NaN 時は無効化 (§6.1) | T-M2.5 §2.3 |
+| EMA | 不使用 | docs/open-questions.md |
+| eval metrics (full) | mcd, log_f0_rmse, mrstft, utmos, nisqa | T-M4.1 §9.1 / docs/milestones.md §M6.1 |
+| **論文 RTF (GAN T=4)** | **GPU 0.0066 / CPU 0.20** | docs/milestones.md §M6.1 / T-M4.3 §2.3 |
+| RTF iter 数 (T) | model config の T (論文と揃える、T=4) | T-M4.3 §8.2 |
+| 論文 Table 一致許容 | ±10% (絶対値) かつ 相対順序 (主軸) | docs/milestones.md §M6.1 / T-M4.1 §8.2 |
+
+### 2.4 アルゴリズム / 処理フロー
+1. **(前提) M5.1 gate GO 確認**: user が T-M5.1 の divergence gate 3 指標 + sample audio + 33k step wall-clock 実測を見て **GO/NO-GO 承認** (課金前)。NO-GO なら本チケットを起動しない
+2. **(cross-ticket) `synthesize(mel)` alias 確認**: `GANWaveNext2.synthesize(mel)` が無ければ T-M2.4 へフィードバックして追加させる (RTF 測定で必須、§9)
+3. **config 確定**: T-M5.1 §8.3 で確定した最適 hyperparameter (eps / segment_length / D update 比 / batch / amp / `auto_oom_fallback`) を `configs/gan_wavenext2.yaml` に反映、max_steps=2M
+4. **(user 操作) GPU 環境準備**: A100 環境 (AWS p4 / Lambda Labs / RunPod / 社内クラスタ) の確保・SSH・課金・接続設定
+5. `uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml` を **`run_in_background=true`** で起動
+6. **長時間監視 (数時間〜数日おき)**: TensorBoard ログを `tensorboard --inspect` / scalar CSV export / Monitor (stdout 各行) で確認。divergence gate 3 指標 (loss_G 傾向 / loss_adv ∈ (0.5,2.0) / loss_D ≥ 0.01) + NaN/Inf を継続チェック。background プロセスの生存 (PID/exit code) とログ最終更新時刻の停滞で死活監視
+7. **自動 resume**: divergence (NaN) / OOM / GPU preemption (SIGTERM) を検知したら最新の健全 checkpoint から完全 state 復元で resume (§6.1)。NaN 復帰時は lr 半減 / eps=1e-5 / AMP 無効化を config で調整
+8. **checkpoint ごと validation**: 10k step ごとに 100 utt validation を `evaluate()` で実行、MR-STFT 最小で `best.pt` を atomic rename 更新
+9. **cloud sync**: checkpoint / TensorBoard ログを S3/GCS に定期 sync (preemption / disk full 対策)
+10. **完走 (or early stop) 後 full eval**: `best.pt` を `evaluate()` facade で test-clean 4824 utt 評価 → UTMOS / NISQA / MCD / log F0 RMSE を `eval_results/gan_full.json` に永続化
+11. **RTF 測定**: `measure_rtf(G, mels_100, device="cuda")` (A100) と `device="cpu"` (1-core, OMP_NUM_THREADS=1) で T=4 の RTF を測定、論文 (GPU 0.0066 / CPU 0.20) と対比 (compile on/off 両報告、T-M4.3 §8.1)
+12. **合否判定**: validation MR-STFT プラトー + 客観指標が論文 Table と相対整合 (±10% or 相対順序) + RTF 一致。結果を §8.3 に記録し T-M6.3 / T-M7.1 へ申し送り
+
+## 3. エージェントチームの役割と人数
+
+| 役割 | 人数 | 担当範囲 | 推奨 subagent_type |
+|---|---|---|---|
+| Operator/Monitor | 1 | `train_gan.py` を background 起動・長時間 TensorBoard 監視・divergence/OOM/preemption 時の自動 resume・cloud sync | general-purpose |
+| Evaluator | 1 | checkpoint ごと validation + 完走後 full 4824 utt `evaluate()` + RTF 測定 (A100/CPU) + 論文 Table 相対比較 | Explore |
+| Reviewer | 1 | Acceptance 検証 + `synthesize` alias cross-ticket 確認 + M6 phase review + T-M6.3/T-M7.1 申し送り作成 | general-purpose |
+
+### 並列度
+- 同フェーズ内の他チケットと並列実行可能か: **条件付き yes** (T-M6.2 (Diff フル訓練) と GPU を共有しなければ並列可。単一 A100 なら順次。Diff は約 32h と軽いので GAN 410h の合間に挟める)
+- 並列実行する場合の最大並列数: 2 (T-M6.1 / T-M6.2、GPU が複数あれば)
+- 後続 T-M6.3 (ablation) / T-M7.1 (MOS) は本チケットの `best.pt` が gate
+
+## 4. 提供範囲 (Scope)
+
+### In Scope
+- 既存 `train_gan.py` の **2M step background 起動・長時間監視・自動 resume** (新規 train コードなし)
+- T-M5.1 で確定した最適 hyperparameter の `configs/gan_wavenext2.yaml` への反映 (max_steps=2M)
+- **`GANWaveNext2.synthesize(mel)` alias** の T-M2.4 への追加 (本格訓練起動前、RTF 測定で必須、cross-ticket)
+- divergence (NaN) / OOM / GPU preemption の検知と完全 state 復元 resume
+- checkpoint 保存ごとの `evaluate()` validation + best.pt atomic rename 更新
+- 完走後の full 4824 utt 客観評価 (`evaluate()` facade、UTMOS/NISQA/MCD/log F0 RMSE)
+- RTF 測定 (`measure_rtf`、A100 GPU + 1-core CPU、T=4、compile on/off 両報告)
+- 論文 Table 1〜3 との相対比較 (±10% or 相対順序、T-M4.1 §8.2)
+- checkpoint / TensorBoard ログの cloud (S3/GCS) sync (薄い script)
+- `eval_results/gan_full.json` への評価結果永続化
+
+### Out of Scope
+- **新規 train ロジック / loss / model 本体** (すべて T-M2.x で完成済前提、本チケットは起動のみ)
+- **MCD / log F0 RMSE / UTMOS / NISQA / RTF の指標実装本体** (T-M4.1 / T-M4.2 / T-M4.3、本チケットは `evaluate()` / `measure_rtf` を呼ぶだけ)
+- **Diff フル訓練** (T-M6.2)
+- **ablation (T=2,3,4,5 比較 / with-without)** (T-M6.3、本チケットは T=4 single config の best.pt 生成のみ)
+- **主観評価 (MOS)** (T-M7.1)
+- **multi-GPU DDP / accelerate** (本チケットは single A100。§8.1 でゼロから作り直す場合の代替として記載、本格採用は別 PR)
+- **torch.compile / ONNX / TorchScript での高速化** (RTF は compile on/off 報告に留め、最適化本体は別 PR)
+- **論文 Table との数値対比レポートの体裁整形** (T-M6.3 で比較表・プロット生成)
+- **GPU クラスタ確保 / SSH / 課金 / GO-NOGO 承認** (user 操作、§9.3)
+
+### Deliverable
+- ファイル:
+  - `checkpoints/gan/best.pt` (訓練成果物、commit しない。T-M6.3 / T-M7.1 のベース)
+  - `eval_results/gan_full.json` (full 4824 utt 評価結果、`.gitignore` 済)
+  - `configs/gan_wavenext2.yaml` (T-M5.1 確定 hyperparameter 反映済、max_steps=2M)
+  - (任意) `scripts/sync_checkpoints.sh` (cloud sync の薄い script)
+  - `src/wavenext2/models/gan_wavenext2.py` の `synthesize(mel)` alias (T-M2.4 cross-ticket)
+- 関数 / クラス: `GANWaveNext2.synthesize(mel)` (cross-ticket)。それ以外は既存 `train_gan.main` / `evaluate` / `measure_rtf` を再利用
+- ドキュメント差分:
+  - `docs/milestones.md` §M6.1 Acceptance チェックボックス更新
+  - `docs/tickets/index.md` T-M6.1 ステータス + M6 フェーズレビューログ
+  - §8.3 に訓練結果 (収束 / 論文対比 / RTF 実測) を追記
+
+## 5. テスト項目
+
+> **本チケットの本体は GPU 必須・長時間の e2e (`@pytest.mark.slow @pytest.mark.gpu`)**。CI には乗らず、user の A100 環境での実起動 + Operator/Evaluator の監視・測定が実体。
+
+### 5.1 Unit テスト (起動前の軽量確認)
+- [ ] `configs/gan_wavenext2.yaml` が `load_config` でパース可能、`max_steps == 2_000_000`、必須 key (train/validation/checkpoint/logging/data/model/discriminator) が揃う
+- [ ] `configs/gan_wavenext2.yaml` と T-M5.1 の `gan_wavenext2_1epoch.yaml` の diff が **max_steps のみ** (+ T-M5.1 で確定した hyperparameter 反映分)、key drift なし
+- [ ] **`GANWaveNext2.synthesize(mel)` が引数 1 個で呼べる** (`synth = getattr(G, "synthesize", G.forward); synth(mel)` が TypeError にならず、`forward(mel, audio_length=None)` 相当の出力)
+- [ ] `measure_rtf` の dispatch (`getattr(model, "synthesize", model.forward)`) が `GANWaveNext2` で `synthesize` を選択 (T-M4.3 §5.1 `test_dispatch_*` 相当)
+
+### 5.2 e2e / 結合テスト (GPU 必須・`@pytest.mark.slow @pytest.mark.gpu`、本チケット本体)
+- [ ] **2M step を完走 (or early stop)** (A100 約 410h、OOM 時は batch=8 / `--amp` / grad_ckpt で再開)
+- [ ] **resume が optimizer / scheduler / step counter / RNG state を完全復元** (同一 step で resume 前後の lr / loss が連続、特に InverseLR が step=1.5M 相当の lr を復元し step 0 に戻らない、§6.1)
+- [ ] **validation MR-STFT がプラトー** (収束曲線の移動平均の傾きが閾値以下、右肩下がりから平坦へ遷移)
+- [ ] full 4824 utt `evaluate()` で **UTMOS / NISQA / MCD / log F0 RMSE が finite かつ論文 Table と相対整合** (±10% or 相対順序、GT≈0 / 破綻なしの UTMOS 目安 > 3.0)
+- [ ] **RTF が論文と一致**: `measure_rtf(G, device="cuda", T=4)` で **GPU ≈ 0.0066**、`device="cpu"` (1-core) で **CPU ≈ 0.20** (同一 GPU 種別 A100 でのみ絶対対比有効、compile on/off 両報告)
+- [ ] TensorBoard に loss curve (loss_G/loss_adv/loss_D/各 sub-loss) / sample audio / mel が記録、2M step 全域で NaN/Inf 出現なし (出たら resume で復帰した記録)
+- [ ] checkpoint / TensorBoard ログが S3/GCS に sync され、preemption 後も復元可能
+
+### 5.3 Acceptance criteria (`docs/milestones.md` §M6.1 より転記)
+- [ ] 2M step 完走 (or early stop)
+- [ ] validation MR-STFT loss がプラトー
+- [ ] 客観評価: UTMOS, NISQA, MCD, log F0 RMSE が論文 Table 1〜3 と概ね一致 (±10%、ただし backend 差を考慮した相対比較主軸 T-M4.1 §8.2)
+- [ ] RTF が論文と一致 (T=4 で GPU 0.0066, CPU 0.20)
+
+### 5.4 追加 acceptance (本チケット独自)
+- [ ] `GANWaveNext2.synthesize(mel)` alias が実装され RTF 測定 dispatch で動作 (cross-ticket、本格訓練起動前)
+- [ ] divergence/OOM/preemption からの自動 resume が完全 state 復元で成功した記録が残る
+- [ ] `eval_results/gan_full.json` に full 4824 utt の per-utterance + summary が永続化 (論文 Table 対比の再計算回避)
+- [ ] T-M6.3 / T-M7.1 へ best.pt と評価結果が §9.1 で明文化
+
+## 6. 懸念事項
+
+> **本チケットは GPU 課金が発生する最重量タスク (A100 約 410h)**。divergence / OOM / preemption での無駄打ち防止と、backend 差による論文 Table 不一致の扱いが要点。
+
+### 6.1 技術的リスク
+
+#### 【重要】410h 訓練の予算超過
+- A100 単体で約 410h (≒ 17 日連続)。クラウドなら課金が大きく、preemption / 障害で再開のたびにコスト増
+- **緩和**: ① **checkpoint averaging (SWA)** で終盤の複数 checkpoint を平均し品質を補完 (2M step 完走前でも近い品質を出せる)、② **early stop** (validation MR-STFT プラトー検知で 2M 未満でも打ち切り)、③ cloud sync で再開コスト最小化
+- **検知**: validation MR-STFT の移動平均の傾きが閾値以下になったら early stop 候補として user に提示
+- **再評価トリガー**: 予算確定時 (§8.1)。fixed-step (2M) でなく budget-cap / early-stop ベースへ切替
+
+#### 【重要】divergence (NaN) からの復帰
+- 2M step の長時間では eps=1e-7 の外れ値膨張 (T-M5.1 §6.1 代理指標で監視済) や rare batch で NaN/Inf が出うる
+- **緩和**: ① `grad_clip_norm=1.0` が効いているか確認 (維持)、② **AMP (bf16) 無効化** して fp32 に戻す、③ **lr 半減**、④ **eps=1e-5** に上げる — のいずれかを config で調整して最新の健全 checkpoint から resume
+- **検知**: TensorBoard で loss_G/loss_adv/loss_D の NaN/Inf、divergence gate 3 指標 (loss_adv ∈ (0.5,2.0) / loss_D ≥ 0.01) の逸脱。Monitor で stdout の `nan` 文字列
+- **resume 完全性 (前提)**: T-M5.1 で確認済 (optimizer/scheduler/step/RNG 完全復元、InverseLR warmup 途中でも lr リセットなし)。2M step では resume が頻発するため最重要
+
+#### 【重要】GPU preemption (spot instance)
+- コスト削減で spot/preemptible instance を使うと予告付き / 突然の中断が起きる
+- **緩和**: T-M2.5 実装済の **SIGTERM/SIGINT handler** (`_emergency_save` → `emergency_step_N.pt`) + **atomic checkpoint** (`best.pt.tmp` → `os.replace`)。preemption 通知 (SIGTERM) で緊急保存 → 別ノードで `--resume emergency_step_N.pt`
+- **検知**: プロセスの exit / SIGTERM 受信、ログ最終更新時刻の停滞 (T-M5.1 §6.1 死活監視)。検知したら自動で別ノード起動 + resume
+- **注意**: emergency save は通常の checkpoint 間隔 (10k step) とは別。resume 後 step counter が正しく継続するか確認
+
+#### 【重要】backend 差で論文 Table と絶対値が合わない
+- MCD は backend / MFCC order / DTW mode で系統差、UTMOS/NISQA は実装 (speechmos vs fairseq) で値が変わる (T-M4.1 §8.2 / T-M4.2)
+- **緩和**: **相対比較主軸** (T-M4.1 §8.2)。論文 Table の絶対値一致 (±10%) は努力目標とし、合否は **自系列内の順序関係** (GT≈0、GAN < Diff、with-FM > without-FM 等) で判断。`eval_results/gan_full.json` にどの backend で測ったか記録
+- **検知**: 絶対値が ±10% を外れても相対順序が論文と整合すれば pass 寄り。乖離が大きければ backend / mode を T-M4.1 §8.1 に従い再検討
+
+#### 【重要】best.pt race condition
+- validation improvement 頻発期 (訓練序盤) や cloud sync との競合で `best.pt` が部分書き込み / 破損するリスク (T-M2.4 §6.1)
+- **緩和**: T-M2.4/T-M2.5 実装済の **atomic rename** (`torch.save(state, "best.pt.tmp")` → `os.replace("best.pt.tmp", "best.pt")`、POSIX/Windows 共通アトミック)。cloud sync は `best.pt` の os.replace 完了後に行う (sync 中の中間状態を読まない)
+- **検知**: `best.pt` ロード時に key 欠落 / shape mismatch が出ないか起動時に確認
+
+#### その他リスク
+- **OOM (T=4 × batch=16 × sub-model 4 段)**: 緩和優先順位 ① `--amp` (bf16) → ② `model.enable_grad_ckpt=true` → ③ batch_size=8。T-M5.1 で確定した組み合わせ (+ `auto_oom_fallback`) を踏襲。長時間訓練中に rare に長い utterance で OOM する可能性も監視
+- **disk full**: 2M step / 10k step ごと save = 200 ckpt × 数百 MB。`keep_last_n=5` で rolling delete (best.pt 除外) + cloud sync 後にローカル削除
+- **ログ・checkpoint の cloud sync (S3/GCS)**: 長時間訓練ではローカルディスク / instance 寿命に依存しないよう定期 sync 必須。TensorBoard ログも sync し、gate 判定 / 論文対比に使った scalar が消えないようにする。sync は atomic write 完了後
+- **RTF が A100 以外で乖離**: ローカル GPU (RTX) / Colab で測ると論文 (A100) と乖離 (T-M4.3 §6.1)。**最終 RTF は A100 上で測定**、`device` 名を記録、同一 GPU 種別でのみ絶対対比。compile on/off 両報告で論文条件を推定
+- **`synthesize(mel)` alias 欠如 → RTF 測定不可**: T-M2.4 に alias が無いと `measure_rtf` 内の `synth(mel)` が TypeError (T-M4.3 §6.1)。**本格訓練起動前に T-M2.4 へ追加** (§9 cross-ticket)
+- **長時間 TensorBoard ログの肥大**: sample audio (24kHz × 数秒 × 4 utt × 200 validation) で数 GB。`num_audio_samples=4` 限定 + global_step 間引き (T-M2.5 §6.1)
+
+### 6.2 仕様の曖昧さ
+- `docs/open-questions.md` 関連項目: すべて確定済み
+- 本チケット固有の判断:
+  - **MR-STFT プラトー判定の定量化**: validation MR-STFT total の移動平均 (例: 直近 10 validation = 100k step) の傾きが閾値以下を「プラトー」とする。early stop もこの基準を流用
+  - **論文 Table ±10% vs 相対順序のどちらを gate にするか**: **相対順序を主軸**、±10% は努力目標 (T-M4.1 §8.2)。backend 差で絶対値が合わなくても相対順序が整合すれば pass 寄りと判断
+
+### 6.3 他チケットとの整合性
+- **T-M5.1 (gate)**: 本チケットは T-M5.1 が pass し user が GO を出した config を引き継ぐ。divergence gate を通過済の `gan_wavenext2_1epoch.yaml` の hyperparameter を本番 config に反映 (T-M5.1 §9.1)
+- **T-M2.5 (train_gan)**: `main()` CLI / `train_gan_step` / SIGTERM handler / atomic checkpoint / resume 機構をそのまま使う。本チケットは max_steps=2M の config 差分のみ
+- **T-M2.4 (GAN model)**: **`synthesize(mel)` alias を本格訓練起動前に追加** (RTF 測定で必須、T-M4.3 §9 / 本チケット §9 cross-ticket)。atomic best.pt rename も T-M2.4 §6.1 で要請済
+- **T-M4.1 (evaluate facade)**: `evaluate(model, dataset, metrics, post_filter, *, seed, save_to) -> EvalResult` を full 4824 utt で呼ぶ。論文 Table 対比は相対比較主軸、`eval_results/gan_full.json` 永続化
+- **T-M4.3 (RTF)**: `measure_rtf(model, mels, *, device, ...)` を A100 GPU + 1-core CPU で呼ぶ。GAN は `synthesize(mel)` dispatch、iter 数 (T=4) は model config 依存で論文と揃える
+- **T-M6.3 (ablation) / T-M7.1 (MOS)**: 本チケットの `best.pt` を T=2,3,4,5 比較のベース / 主観評価サンプル生成に渡す (§9.1)
+
+## 7. レビュー観点
+
+実装完了後、Reviewer が以下を確認:
+
+- [ ] 訓練ロジックを新規実装せず T-M2.5 `train_gan.py` を起動している (DRY)
+- [ ] 評価が `evaluate()` facade 1 entry point + `measure_rtf` で、グルーコードを書いていない
+- [ ] `configs/gan_wavenext2.yaml` が T-M5.1 確定 hyperparameter を反映し max_steps=2M、key drift なし
+- [ ] **`GANWaveNext2.synthesize(mel)` alias が本格訓練起動前に T-M2.4 に追加され、RTF dispatch で動作**
+- [ ] 2M step 完走 (or early stop)、validation MR-STFT プラトー
+- [ ] divergence/OOM/preemption からの自動 resume が完全 state 復元 (optimizer/scheduler/step/RNG、InverseLR lr 連続)
+- [ ] full 4824 utt 客観評価が論文 Table と相対整合 (±10% or 相対順序)、RTF GPU 0.0066 / CPU 0.20 と一致
+- [ ] best.pt が atomic rename、cloud sync が atomic write 完了後
+- [ ] M6 phase review の結果が §8.3 に実測値付きで記録
+- [ ] T-M6.3 / T-M7.1 への申し送り (best.pt + 評価結果) が §9.1 で具体的
+- [ ] 参考実装をコピーしていない (起動・評価のみで新規ロジックなし、`synthesize` alias は薄い wrapper)
+
+## 8. ゼロから作り直すとしたら
+
+> このセクションはチケット作成時に初稿を書き、**M6 完了時にエージェントチームで再評価して必要なら更新する**。
+
+### 8.1 別の設計を採るとしたら
+
+| 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
+|---|---|---|---|---|
+| **2M step fixed でなく early stop ベース** | validation プラトー検知で打ち切り、410h の無駄を削減・予算を最小化 | 「2M step 完走」の論文準拠感がない、early stop 基準の調整が要る | milestones.md が「2M step (or early stop)」と明記。fixed step は論文再現の基準として明快 | **予算確定時** (§6.1)。クラウド課金が高ければ early-stop / budget-cap を主軸に |
+| **multi-GPU DDP (accelerate) で wall-clock 短縮** | 4×A100 で **410h → 約 100h** に短縮、preemption リスク期間も短縮 | DDP 化の実装・デバッグコスト、rank0-only checkpoint / sampler 分割の罠、single-GPU 結果との一致検証 | T-M2.5 は single-GPU 前提 (DDP は別 PR)。本チケットは既存 train_gan.py 起動が原則 | **wall-clock 410h が運用上過大** と判明したとき。accelerate 導入を別 PR で |
+| **checkpoint averaging (SWA) を最初から** | 終盤の複数 checkpoint 平均で品質を底上げ・分散低減、early stop と相性良 | SWA の bn 再計算 (vocoder は bn なしなので軽い) / averaging window の調整 | 本チケットは品質補完策 (§6.1) として後付け想定。最初から組むと config が複雑化 | **2M step 完走前に品質を出したい / 予算超過時** (§6.1) |
+| **spot instance + 自動 resume orchestrator** | コスト最小 (spot は on-demand の 1/3 程度)、preemption → 別ノード自動 resume で無人運用 | orchestrator (preemption 検知 → ノード起動 → resume) の実装、spot 中断頻度依存 | 本チケットは SIGTERM handler + atomic checkpoint (T-M2.5) で半自動。完全 orchestrator は別途 | **長時間訓練で手動 resume が頻発し煩雑なとき**。T-M6.2 と共通化 |
+| **段階的解像度 / progressive segment_length** | 序盤短 segment で高速・終盤長 segment で high-res STFT 改善 (T-M5.1 §6.1 underfit 懸念に対処) | カリキュラム設計が論文外、収束挙動の検証コスト | 論文は固定 segment。T-M5.1 で segment を確定する方針 | **T-M5.1 で high-res STFT 項が underfit と判明し固定 segment で改善しないとき** |
+
+#### 採用設計
+- **既存 `train_gan.py` を max_steps=2M で background 起動するだけ** (新規コードゼロ、T-M5.1 確定 config を拡張)
+- **`evaluate()` facade + `measure_rtf` で full 評価** (グルーコードを書かない、T-M4.1/T-M4.3 の設計意図に乗る)
+- **唯一の新規コードは `GANWaveNext2.synthesize(mel)` alias** (T-M2.4 cross-ticket、RTF 測定の薄い wrapper)
+- **論文 Table 対比は相対比較主軸** (T-M4.1 §8.2)。backend 差で絶対値が合わなくても相対順序で合否判断
+- **divergence/OOM/preemption は SIGTERM handler + atomic checkpoint + 完全 state resume で対処** (T-M2.5 実装済)
+- **品質補完は checkpoint averaging、予算超過は early stop** (fixed 2M を堅持しつつ逃げ道を用意)
+
+#### 再評価トリガー
+- **予算確定時**: 2M fixed → early stop / budget-cap、single-GPU → multi-GPU DDP、on-demand → spot + orchestrator への切替を判断 (§8.1 表)
+- **M6 完了時**: 論文 Table との乖離が backend 起因か実装起因かを判定、乖離が大きければ T-M4.1/T-M4.2 backend を再検討
+
+### 8.2 思想 / 哲学の見直し
+- **粒度**: 適切。M6.1 は「実データ full 訓練で論文品質を出す」最重量タスク。size=L (起動 + 長時間監視 + 自動 resume + full eval + RTF) が妥当
+- **gate (T-M5.1) との役割分担**: T-M5.1 = divergence の不在 (1 epoch、品質は問わない)、T-M6.1 = 品質 (full 訓練、論文 Table 相対対比)。M6.1 で品質が出なければ T-M5.1 で見落とした hyperparameter / 統合バグを疑う前に、**まず 2M step が本当に必要量か** (early stop 曲線) を確認
+- **「絶対値でなく相対比較」哲学**: 論文 Table の絶対値再現は backend 差で困難 (T-M4.1 §8.2)。再現の合否は **自系列内の順序関係** (GT≈0 / GAN < Diff) で判断し、論文値は参考に留める。±10% は努力目標
+- **判定者 = Claude Code の品質判定 + user の予算判断**: T-M5.1 の gate (課金前 GO/NO-GO) は user 判断だったが、本チケット起動後の品質判定 (プラトー / 論文対比 / RTF) は Claude Code が下せる。ただし **early stop / 予算超過時の打ち切り判断は user (課金者)** に委ねる
+- **CI 不可 (GPU + 410h)**: 本チケットの e2e は A100 で数百時間を要し CI に乗らない。user 環境での実起動 + Operator/Evaluator の監視・測定が実体 (`@pytest.mark.slow @pytest.mark.gpu`)
+
+### 8.3 学んだこと (チケット完了後に追記)
+- (実装完了後に追記)
+- **2M step 完走 vs early stop の実際**: TBD (収束曲線で確定)
+- **論文 Table との乖離幅と相対順序の整合**: TBD (full eval 後)
+- **RTF 実測 (A100 GPU / 1-core CPU、compile on/off)**: TBD (論文 GPU 0.0066 / CPU 0.20 との対比)
+- **divergence/OOM/preemption の発生頻度と resume の信頼性**: TBD
+- 想定外: TBD
+- 教訓: TBD
+
+## 9. 後続タスクへの連絡事項
+
+### 9.1 後続チケットに渡す情報
+
+#### T-M6.3 (ablation) へ
+- **best.pt を T=2,3,4,5 比較のベースに**: 本チケットの `checkpoints/gan/best.pt` (T=4) を ablation matrix の基準点とする。T-M6.3 は T を変えて再訓練 (or sub-model 段数を変えて) し、論文 Table 1〜3 の trend (T 増で品質向上・RTF 悪化) を再現
+- **使用方法**: `configs/gan_wavenext2.yaml` の `model.T` を 2/3/4/5 に変えて `train_gan.py` を再起動、各 best.pt を `evaluate()` + `measure_rtf` で評価。本チケットの T=4 結果を比較表の 1 行として流用
+- **評価方法**: `eval_results/gan_full.json` (T=4) を読んで再計算せず比較 (T-M4.1 §9.1)
+
+#### T-M7.1 (MOS) へ
+- **生成サンプルを主観評価に**: 本チケットの `best.pt` (T=4) で生成した test-clean サンプルを MOS テスト (20 utt × 6 models) のうち GAN-WaveNeXt 2 (T=4) の系列として提供
+- **Acceptance 連携**: T-M7.1 の「GAN-WaveNeXt 2 (T=4) の MOS ≥ HiFi-GAN」判定に本 best.pt のサンプルを使う
+
+#### T-M2.4 へ申し送り (cross-ticket、本格訓練前に対応必須)
+- **`GANWaveNext2.synthesize(mel)` alias を実装** (本格訓練起動前): RTF 測定 (`measure_rtf`、T-M4.3) が `getattr(model, "synthesize", model.forward)` で `synth(mel)` を引数 1 個で呼ぶため、`forward(mel, audio_length)` (第 2 引数必須) では TypeError。`synthesize` 側で `audio_length=None` auto-infer を実装すること。これが無いと GAN の RTF 測定が不可 (T-M4.3 §9 / M4 phase review 申し送り)
+
+#### ユーザー操作 (必須、§9.3 と重複)
+- **A100 GPU クラスタ確保**: AWS p4 / Lambda Labs / RunPod / 社内クラスタ。約 410h (spot なら中断前提)
+- **SSH 認証・課金設定**: user 側で実施
+- **Claude Code が訓練起動できる接続設定**: background 起動 + 監視できる環境
+- **M5.1 gate の GO/NO-GO 承認**: 課金前に T-M5.1 の divergence gate 結果を見て GO/NO-GO (§8.2)
+
+### 9.2 ドキュメント更新
+- 完了時に更新するドキュメント:
+  - [ ] `docs/milestones.md` §M6.1 の Acceptance チェックボックス 4 項目を ☑ に更新
+  - [ ] `docs/tickets/index.md` の T-M6.1 ステータスを `📝 pending` → `✅ completed`、M6 進捗サマリ + フェーズレビューログ M6 行を更新
+  - [ ] §8.3 に訓練結果 (収束 / 論文 Table 相対対比 / RTF 実測 / divergence 頻度) を実測値付きで追記
+  - [ ] (該当時) `docs/training.md` §2 に最終 hyperparameter / RTF 実測値を反映
+
+### 9.3 Open question として残ったもの
+- **2M step が必要量か** (early stop で十分か) — 収束曲線で確認、過剰なら §8.1 early-stop 主軸へ
+- **論文 Table との絶対値乖離が backend 起因か実装起因か** — 相対順序が整合すれば backend 起因と判断、乖離大なら T-M4.1/T-M4.2 backend 再検討
+- **RTF が A100 で論文 (GPU 0.0066 / CPU 0.20) と一致するか** — compile on/off 両報告で論文条件を推定 (T-M4.3 §8.1)、乖離あれば warmup/sync/iter 数を見直し
+- **multi-GPU DDP / spot orchestrator を導入すべきか** — wall-clock 410h / 予算が過大なら §8.1 の DDP / spot 案を別 PR で検討
