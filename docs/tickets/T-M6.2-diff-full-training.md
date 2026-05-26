@@ -316,6 +316,7 @@ uv run python scripts/eval_diff_full.py --checkpoint-dir checkpoints/diff/ --fir
   - **2-step (M5.2) では不十分な理由**: M5.2 は sub-model 1 のみ訓練して t=1→2 の 1 遷移だけ確認。本番は t=1→2→3→4 の 3 遷移すべてを実 eps_pred で通すため、sub-model 2→3 / 3→4 遷移の σ 計算経路は本チケットで初検証
   - **検知**: full 4-step reverse の出力に NaN/Inf があれば即 NO-GO、T-M3.3 を最優先で再オープン (`_compute_ddpm_coefficients` の σ index / α-based formula を再確認)
   - **gate 順序**: ① full reverse NaN なし → ② post-filter 周波数応答正常 → ③ 論文相対整合 の順。NaN が出れば品質が出ていても NO-GO
+  - **post-filter fit 元 (reverse 出力) の安定性が前提 (M6 レビュー追加、CRITICAL #1 に連結)**: FIR は dev 200 utt で fit するが、**fit に使う synth は 4-step reverse (seed=43) の出力**である。reverse が sub-model ばらつき (とりわけ β 負値の残滓や sub-model 4 の不安定) で unstable だと、FIR がそのばらつきを吸収してしまい test で逆効果になる。すなわち「**reverse 出力が安定している**」ことが post-filter fit の前提条件であり、これは CRITICAL #1 (β 負値解決) の解決と明示的に連結する。**gate 順序の ① (full reverse NaN なし) を通過しないと ② (post-filter) に進めない**のはこの依存関係による (NaN がなくても reverse 出力の分散が大きければ FIR fit が不安定になりうる点に注意)
 
 - **CRITICAL #2: config-shape mismatch の統合バグ (T-M5.2 §8.2 から、本チケットが初検証地点)**:
   - M5.2 で検証した `diff_wavenext2_1epoch.yaml` は `sub_model_idx=k` 単体・`only_sub_model=k` lazy instantiation 形状。**本チケットで初めて (a) 4 sub-model 一括 config への変換、(b) 4 ckpt の統合ロード (`from_config(only_sub_model=None)` で 4 sub-model 全部 instantiate + `sub_{1,2,3,4}.pt` を `strict=False` ロード) を行う**ため、1epoch config がそのまま 4 sub-model config に通る保証はない
@@ -329,6 +330,9 @@ uv run python scripts/eval_diff_full.py --checkpoint-dir checkpoints/diff/ --fir
 - **`c * 1000` rescale が必要だったか (M5.2 の結果次第、T-M1.5)**: M5.2 で sub-model 4 の conditioning が cos<0.5 を満たし `c_rescale=1.0` で十分と確定していればそのまま継承。M5.2 で `c_rescale=1000.0` に切り替えていれば本チケットも 1000.0 で統一。**本番で 4 sub-model 全部に同じ rescale 値を適用** (sub-model 間で rescale を変えると conditioning スケールが不整合になる)
 - **post-filter の dev set 200 utt で overfit (T-M3.4)**: FIR は dev set 200 utt の振幅差平均で fit するため、test-clean に対し generalize しない懸念。**検知**: post-filter apply で MCD が **改善でなく悪化** する場合 overfit を疑い、dev set サイズを増やす (T-M3.4 §8.1 で 50/100/200/500 比較) か、低域フラット制約を強める。time-invariant な spectral tilt 補正なので utterance 依存性は本質的に小さいが、本番 4 sub-model の FIR で初めて検証
 - **4 sub-model の cloud sync (順次訓練の中断・再開)**: 4 sub-model を 1 GPU で順次 ~32h 回す間に cloud preemption / 課金切れで中断する懸念。`train_diff_all.py` の state file (どの sub-model まで完了したか) + 各 sub-model の latest checkpoint resume で対応。**SIGTERM handler** (T-M3.2 / T-M2.5 `register_sigterm_handler`) で preemption 時に emergency save。checkpoint を cloud storage に定期 sync する運用を推奨
+- **state file も cloud sync 対象 (M6 レビュー追加)**: `train_diff_all.py` の state file (どの sub-model まで完了したか) がローカルディスク前提だと、**preemption でインスタンスごと消えて completion 状態をロスト**し、完了済み sub-model を再訓練する無駄打ちが起きる。state file (`checkpoints/diff/_train_state.json`) も checkpoint と同じく cloud storage に sync 対象に含める。spot instance に分散する設計 (§8.1 昇格) では各 sub-model の完了通知を中央 state に集約する必要があるため特に重要
+- **checkpoint / eval の cloud 退避 (M6 レビュー追加)**: 本チケットは `fir.npy` の git commit のみ明記しているが、**checkpoint (`sub_{1,2,3,4}.pt`) / eval 結果 (`eval_results/*.json`) の cloud sync が GAN (T-M6.1) ほど明記されていない**。preemption / 課金切れで訓練済み checkpoint を失うと ~8h/sub-model の再訓練になるため、checkpoint・eval も cloud storage に退避する運用を T-M6.1 と共通の `scripts/orchestrate.py` の cloud sync で担保する (§8.1 昇格)
+- **uv.lock cross-platform (M6 レビュー追加、T-M6.1 と共通、T-M0.1 §6 継承)**: ローカル開発 (Windows / macOS) と cloud A100 (Linux) で `uv.lock` が解決する wheel が異なる懸念。torch / torchaudio / soundfile 等の platform-specific wheel が Linux で正しく解決されるか、本番起動前に cloud (Linux) 上で `uv sync` を検証する。T-M0.1 §6 から継承し T-M6.1 と共通の検証項目
 - **post-filter fit の deterministic 性**: `fit_post_filter.py` 内の `reverse_sample(seed=43)` が deterministic でないと fit が flaky。T-M3.4 で `--reproducible` (seed=43) + `fit_stats.json` の (seed, git_sha, checkpoint_sha256) 3 点 record により担保済。本チケットで 2 回 fit して bit-exact 一致を確認
 - **OOM (4 sub-model のいずれか)**: M5.2 で OOM 耐性確認済 (batch_size=20, segment_length=25600, `only_sub_model=k` lazy で 1/4 メモリ)。本番でも `only_sub_model=k` で 1 sub-model のみ instantiate するため OOM リスクは M5.2 と同等。4 GPU 並列時は各 GPU が 1 sub-model なのでメモリは単体と同じ
 - **論文 Table の絶対値一致は期待しない (T-M4.1 §8.2)**: MCD は backend / MFCC order / DTW mode で系統差、UTMOS/NISQA は推定器バージョン依存。**相対比較主軸** (GT≈高品質、Diff w/ sub-model + post-filter が w/o より良い、論文の順序関係を再現) で合否判定。`eval_results/*.json` を読んで自系列内の相対傾向で判断
@@ -368,20 +372,31 @@ uv run python scripts/eval_diff_full.py --checkpoint-dir checkpoints/diff/ --fir
 
 ### 8.1 別の設計を採るとしたら
 
-| 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
-|---|---|---|---|---|
-| **4 sub-model を 4 GPU で完全並列** (32h → 8h) | wall-clock 1/4、cloud 課金時間短縮、4 sub-model は独立訓練なので並列化が自然 | 4 GPU 確保が前提 (single GPU では不可)、orchestrator の subprocess 管理 + GPU 割り当てロジックが必要 | single GPU 前提では順次 (~32h)。4 GPU 確保できれば `train_diff_all.py --parallel` で並列化 (本チケットで対応済、起動方式 C) | **GPU 4 枚確保でき、wall-clock を短縮したいとき** (推奨) |
+> **M6 フェーズレビュー反映 (2026-05-26)**: 以下 3 案を **採用に昇格** (採用設計に統合) — ①共通 `scripts/orchestrate.py` への launch+monitor+resume+cloud sync 抽出 (M6.1/M6.2/M6.3 で 3 回再発明されるのを防ぐ)、②対比レポート生成器を `eval/report.py` に一本化 (T-M6.1 と共通、T-M4.1 facade 側へ昇格)、③4 sub-model を別々の安い single-GPU spot instance に分散 (embarrassingly parallel、DDP 不要)。加えて 2 案を **検討に追加** — post-filter fit の中間品質可視化 / sub-model 4 への step・lr 厚配分。
+
+#### 採用に昇格した設計 (M6 レビュー)
+
+| 昇格案 | 内容 | 効果 | T-M6.1 / 他チケットとの関係 |
+|---|---|---|---|
+| **共通 `scripts/orchestrate.py` に抽出** | M6.1/M6.2/M6.3 で 3 回再発明される launch+monitor+resume+cloud sync を 1 つの薄い infra 層に抽出。Diff は **4 job として渡す** (`train_diff_all.py` の state-file orchestrator と M6.1 の監視ループを統合) | 重複実装排除 (DRY)、resume / cloud sync ロジックを 1 箇所で保守、GAN/Diff で挙動を揃える | T-M6.1 と共通モジュール。`train_diff_all.py` は `orchestrate.py` に 4 job (sub-model 1-4) を渡す薄い caller に縮小 |
+| **対比レポート生成器を `eval/report.py` に一本化** | 論文 Table 1〜3 対比レポート生成を `eval_diff_full.py` 内に閉じず `eval/report.py` に切り出し、T-M6.1 (GAN) と共通化、T-M4.1 facade 側へ昇格 | GAN/Diff で同一フォーマットのレポート、M6.3 ablation も同じ生成器を再利用 | T-M6.1 と共通。T-M4.1 facade の一部として昇格 (`evaluate()` の出力を `report.py` が消費) |
+| **4 sub-model を別々の安い single-GPU spot instance に分散** | 4 sub-model 独立 = embarrassingly parallel。DDP 不要、各 ~8h、中断時は **当該 sub-model のみ再投入**。GAN (単一 DDP job) より遥かに spot 親和性が高い | spot 価格でコスト圧縮、preemption の影響を 1 sub-model に局所化 (他 3 sub-model は無傷)、4 GPU 並列より柔軟 (バラバラの安いインスタンスで可) | GAN との **本質的な差**: GAN は DDP で全 GPU 同期が必要で spot 中断に弱いが、Diff は 4 独立 job なので spot で 1 本落ちても局所再投入で済む |
 | **BDDM で noise schedule を学習** (4 値固定でなく) | 論文の BDDM noise schedule predictor を完全再現、schedule 最適化で品質↑の可能性 | predictor の再実装コスト大、論文は 4 値を明示しており再現不要 (open-questions.md 確定) | 論文の 4 値固定スケジュールを直接使うのが open-questions.md の確定方針 (predictor 再現不要) | **固定スケジュールで論文品質に届かず schedule が原因と疑われるとき** (M6.3 ablation) |
 | **sub-model 数を 2 / 6 / 8 に変える** (ablation) | step 数と品質のトレードオフ探索、論文の 4-step 選択の妥当性検証 | 訓練コスト N 倍、band partition / schedule の再設計が必要 | 論文は 4 sub-model (4-step) を採用、本チケットは本命再現に集中 | **T-M6.3 ablation で sub-model 数の影響を測るとき** |
 | **post-filter を learnable NN に** | dev set fit の time-invariant FIR より表現力が高い、utterance 適応も可能 | 訓練コスト増、論文は time-invariant FIR (Okamoto21) を採用、推論 hot path が重くなる | 論文準拠の time-invariant FIR が確定方針 (T-M3.4)、推論速度 (RTF) も維持 | **T-M6.3 で post-filter の品質寄与が小さく learnable で改善余地があるとき** |
 | **per-sub-model lr チューニング** (sub-model 1 vs 4 で lr 変更) | loss scale 不均衡 (sub-model 1 と 4 で MSE 桁違い) に対し収束速度を揃えられる | ハイパーパラメータ探索コスト、論文は一律 lr=2e-4 | まず一律 lr で M5.2 単調性 baseline と比較。桁差は正常なので lr 変更は最終手段 | **sub-model 1 or 4 が一律 lr で収束しない / プラトーが極端に遅いとき** (§6.1) |
+| **post-filter fit を各 sub-model 完成ごとに暫定 FIR で中間品質可視化** (M6 レビュー検討追加) | 4 本逐次 ~32h で sub-model 4 (最難・最終 denoise 段) の不調が全工程後まで分からないのは無駄打ちリスク。各 sub-model 完成時点で暫定 FIR を fit して中間品質を可視化すれば早期に異常を検知できる | 暫定 FIR は他 sub-model 未完のため代用入力 (x_{k-1} を GT 由来) が必要で、本番 FIR とは別物。可視化用の追加コード | 本番 fit は 4 sub-model 揃ってから (本命)。ただし **sub-model 4 単体の reverse (t=4 のみ、x_3 を GT 由来で代用) を早期 sanity に**回す価値がある (sub-model 4 が最難なため) | **4 本逐次訓練で sub-model 4 の不調を早期検知したいとき / 無駄打ちリスクを下げたいとき** |
+| **sub-model 4 に step / lr を厚く配る** (難易度予測に基づく配分、M6 レビュー検討追加) | sub-model 4 は c≈0.3 の低ノイズ域 (= 高周波 detail 担当) で **最難**。「4 本均等に 1M step」でなく難易度予測に基づき sub-model 4 に step / lr を厚配分すれば、最終 denoise 段の品質を底上げできる | 均等配分からの逸脱はハイパーパラメータ探索コスト、過配分で過学習リスク | まず 4 本均等 1M step + 一律 lr で M5.2 baseline と比較。sub-model 4 のプラトーが他より浅い / 高域 detail が出ない場合に厚配分へ | **sub-model 4 が均等配分で品質不足 (高域 detail 不足 / post-filter 過補正破綻) のとき** (§6.1 / §8.2) |
 | **checkpoint averaging (SWA)** | 複数 checkpoint 平均で品質を底上げ (M6 予算超過時の品質補完、リスク表) | 4 sub-model それぞれで averaging が必要、best.pt 選択と二重管理 | まず best validation MSE の `sub_{k}.pt` を使う。EMA は不使用 (open-questions.md 確定) | **本番訓練が 1M step 未達で中断し品質補完が必要なとき** (リスク表) |
 
 #### 採用設計
 - **4 sub-model を `only_sub_model=k` lazy instantiation で 1 つずつ本番訓練** (T-M3.2 流用、メモリ 1/4)、single GPU では順次 (~32h)、4 GPU あれば並列 (~8h)
+- **共通 `scripts/orchestrate.py` に launch+monitor+resume+cloud sync を抽出** (M6 レビュー昇格): M6.1/M6.2/M6.3 横断の薄い infra 層。`train_diff_all.py` は **4 job (sub-model 1-4) を `orchestrate.py` に渡す薄い caller** に縮小。T-M6.1 と共有
+- **4 sub-model を別々の安い single-GPU spot instance に分散** (M6 レビュー昇格): embarrassingly parallel、DDP 不要、各 ~8h、中断時は **当該 sub-model のみ再投入** (preemption の影響を局所化)。GAN (DDP) より spot 親和性が高い
 - **訓練済み 4 ckpt を `from_config(only_sub_model=None)` + `strict=False` で統合ロード** (config-shape mismatch の初検証)
 - **post-filter fit は本番 4 sub-model で初実施** (seed=43 deterministic、`fir.npy` commit)
 - **`evaluate()` facade 1 entry point で test-clean 全評価** (T-M4.1、相対比較主軸)
+- **対比レポート生成器を `eval/report.py` に一本化** (M6 レビュー昇格): 論文 Table 対比を `eval_diff_full.py` に閉じず `eval/report.py` (T-M4.1 facade 側) に切り出し、T-M6.1 (GAN) / T-M6.3 (ablation) と共通化
 - **gate 順序**: ① full reverse NaN なし → ② post-filter 周波数応答 → ③ 論文相対整合 (§6.1)
 
 #### 再評価トリガー
@@ -394,6 +409,8 @@ uv run python scripts/eval_diff_full.py --checkpoint-dir checkpoints/diff/ --fir
 - **M5.2 (gate) と M6.2 (本番) の責務分離**: M5.2 = 1 sub-model で学習可能性・OOM・β 解決を **安く** 確認 / M6.2 = 4 sub-model 本番品質 + 統合 + post-filter + 全評価。粒度は適切。本チケットの核は「4 sub-model 統合後の full 4-step reverse が NaN を出さない (β 解決の本番実証)」と「post-filter 後の論文相対整合」
 - **本格訓練という位置づけ**: M6.2 は Claude Code が起動・監視・統合・評価を担い、wall-clock の制約 (A100 32h) があるため訓練自体は `run_in_background`。M5.2 が pass = アーキテクチャの正しさは担保済で、本チケットは「論文同等の品質が出るか」を本番スケールで検証する最終段
 - **post-filter の責務が M3.4 (実装) と M6.2 (本番 fit) に分離**: M3.4 は API + 未学習 FIR の動作確認、M6.2 で本番 4 sub-model から実 FIR を fit + commit。time-invariant FIR が test-clean に generalize するかは本チケットで初検証 (§6.1 overfit 懸念)
+- **sub-model 間の品質ばらつきを許容する哲学 (M6 レビュー追加)**: 4 sub-model は band ごとに noise level が異なり MSE が桁違いになる (§6.1)。これを異常とせず **各 sub-model の単調性で判定** する一方、品質ばらつき自体は許容する。ただし **sub-model 4 (最難・最終 denoise 段、高周波 detail 担当) が弱いと post-filter が過補正で破綻する依存関係** を明記する: post-filter は reverse 出力の spectral tilt を補正するが、sub-model 4 由来の高域不足を FIR が過剰に持ち上げると test で逆効果になる (§6.1 CRITICAL #1 / overfit 懸念と連結)。「ばらつき許容」と「sub-model 4 だけは品質を担保する」は両立する責務境界
+- **GAN (T-M6.1) とのインフラ共通化 (M6 レビュー追加)**: orchestrator (`scripts/orchestrate.py`) / cloud sync / 通知を GAN・Diff 両チケットで共有する **薄い infra 層** として M6 横断で設計する。M6.1/M6.2/M6.3 で launch+monitor+resume+cloud sync を 3 回再発明しない (§8.1 昇格)。GAN は DDP 単一 job、Diff は 4 独立 job という **訓練形態の差は orchestrator が job リストとして吸収** し、その上の起動・監視・resume・通知ロジックは共通化する
 
 ### 8.3 学んだこと (チケット完了後に追記)
 - (実装完了後に追記)
@@ -411,7 +428,15 @@ uv run python scripts/eval_diff_full.py --checkpoint-dir checkpoints/diff/ --fir
 
 ### 9.1 後続チケットに渡す情報
 
+#### T-M6.1 (GAN フル訓練、sibling) と共通 (M6 レビュー追加)
+M6 横断で共有する薄い infra 層 (§8.1 / §8.2 昇格)。GAN・Diff のどちらが先に着手しても、以下は **両チケットで共通実装・共通検証** する:
+- **`scripts/orchestrate.py`**: launch+monitor+resume+cloud sync の共通 orchestrator。Diff は 4 job (sub-model 1-4)、GAN は 1 DDP job を job リストとして渡す。`train_diff_all.py` はこれを呼ぶ薄い caller に縮小
+- **`eval/report.py`**: 論文 Table 1〜3 対比レポート生成器を一本化 (T-M4.1 facade 側へ昇格)。GAN/Diff/ablation (M6.3) が同一フォーマットを再利用
+- **cloud run dir**: checkpoint / state file / eval 結果 / log を退避する cloud storage の run ディレクトリ構成を GAN・Diff で共通化 (preemption 耐性、§6.1)
+- **uv.lock Linux 検証**: cloud A100 (Linux) 上で `uv sync` が正しく解決するかを本番起動前に両チケットで検証 (T-M0.1 §6 継承、§6.1)
+
 #### T-M6.3 (ablation) へ
+> 本チケットの **4 sub-model (point-specialized) + post-filter 本命系列が M6.3 ablation の比較ベース** (with/without post-filter, with/without sub-modeling の基準点)。M6.3 はここから派生系列を引く。
 - **with/without post-filter 比較**: 本チケットで `evaluate(..., post_filter=fir)` と `post_filter=None` の 2 系列を `eval_results/diff_full_{postfilter,nopostfilter}.json` に永続化済。M6.3 はこれを読んで post-filter の品質寄与を定量化 (再計算不要)
 - **with/without sub-modeling 比較**: 本チケットの 4 sub-model (point-specialized) を baseline とし、M6.3 で single-model (sub-modeling なし) / strict equal partition (Okamoto21、architecture.md §5 注記) と対比
 - **訓練済み 4 ckpt + FIR**: `checkpoints/diff/sub_{1,2,3,4}.pt` + `post_filter/fir.npy` を ablation の起点に流用
@@ -427,11 +452,11 @@ uv run python scripts/eval_diff_full.py --checkpoint-dir checkpoints/diff/ --fir
 - **GPU クラスタ確保 + GO/NO-GO 承認**: A100 単体 ~32h (or 4 GPU 並列 ~8h)。M5.2 gate pass 後、本番訓練 (課金) へ進むかは user の GPU 予算とセットの承認事項 (M6.1 と同様)。SSH 認証・課金設定・接続設定は user 側で実施
 
 #### 失敗時のフィードバック方向 / 遡及調査優先順位 (acceptance を満たせない場合、最優先順)
-1. **β 負値問題 (T-M3.3)** — full 4-step reverse が NaN を出す場合。本番訓練済み 4 sub-model で sub-model 1→2→3→4 の全遷移を確認したうえで `_compute_ddpm_coefficients` の σ index / α-based formula を再オープン (最優先 blocker)
-2. **T-M5.2** — 1 sub-model gate に戻り、本番 config (4 sub-model 一括) の統合バグ / `c_rescale` / OOM / resume 完全性を再確認
-3. **noise embedding rescale (T-M1.5)** — conditioning が本番でも効かない場合 (`c_rescale` 1.0 → 1000.0 を 4 sub-model 一律で再訓練)
+1. **β 負値問題 (T-M3.3)** — full 4-step reverse が NaN を出す場合。本番訓練済み 4 sub-model で sub-model 1→2→3→4 の全遷移を確認したうえで `_compute_ddpm_coefficients` の σ index / α-based formula を再オープン (最優先 blocker)。**reverse 出力の安定は post-filter fit の前提** (§6.1 CRITICAL #1 連結): reverse が unstable だと FIR がばらつきを吸収し test で逆効果になるため、post-filter の不調 (5) を疑う前にまず reverse 安定 (β 解決) を確認する
+2. **T-M5.2** — 1 sub-model gate に戻り、本番 config (4 sub-model 一括) の統合バグ / `c_rescale` / OOM / resume 完全性を再確認。**β 負値 / reverse 安定が post-filter fit の前提**であることを M5.2 gate と連結して再評価
+3. **noise embedding rescale (T-M1.5)** — conditioning が本番でも効かない場合 (`c_rescale` 1.0 → 1000.0 を 4 sub-model 一律で再訓練)。sub-model 4 (低ノイズ域) の conditioning が効かないと reverse が不安定→post-filter 過補正破綻 (§8.2) に連鎖するため、rescale も post-filter fit の前提要因
 4. **T-M3.1** — 4 ckpt 統合ロードで key/shape mismatch が出る場合 (`from_config(only_sub_model=None)` / state_dict 構造)
-5. **T-M3.4** — post-filter が overfit / 周波数応答が範囲外の場合 (dev set サイズ / 集約軸 / clip フォールバック)
+5. **T-M3.4** — post-filter が overfit / 周波数応答が範囲外の場合 (dev set サイズ / 集約軸 / clip フォールバック)。**ただし post-filter の不調は reverse 出力の不安定 (1/2/3) が真因のことがある** (§6.1 CRITICAL #1): post-filter 単体を疑う前に reverse 出力の安定性 (β 解決・rescale・sub-model 4 品質) を先に切り分ける
 
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:

@@ -169,6 +169,9 @@ write_paper_comparison(results)   # → 論文 Table 1〜3 との対比 Markdown
 - **【最大】計算コスト**: GAN T=2/3/4/5 をフル訓練 (各 410h) = 410h × 4 ≈ **非現実的**。
   - **緩和**: fixed step (500k step) で打ち切り、または部分訓練で trend のみ確認。500k step でも T 間の**相対**順序 (品質・RTF の trend) は出る見込み
   - **検知**: wall-clock 予算超過。予算が尽きたら matrix を間引く (T=2/4 のみ等) か本チケット自体をスキップ
+- **【重要・M6 レビュー追加】T sweep の step 非対称で偽 trend**: GAN は fixed-point iteration で T を変えると**収束特性自体が変わる** (T=2 と T=5 で同 500k step では成熟度が非対称)。T 大ほど 1 step が重く未収束になりやすく、「500k step で T 間 trend が出る」という根拠は薄い → **小 T 有利の偽 trend リスク**。
+  - **緩和**: step ではなく **wall-clock 等価 (同一 GPU 時間) で揃える**。打ち切りは wall-clock でなく **per-config 収束度** (loss プラトー / val 指標の頭打ち) で判定し、各 config が同程度の成熟度に達してから比較する
+  - **検知**: 同 step で T 小が不当に優位 (論文 trend と逆順)。収束カーブを併記し未収束の疑いがあれば延長
 - **sub-modeling なし (single model) の追加訓練**: Diff の単一モデルを別途訓練 = 約 **32h 追加**。GPU 予算に含める
 - **論文との定量一致は期待しない**: MCD/UTMOS/RTF は backend・GPU・MFCC order・DTW mode で系統差 (T-M4.1 §8.2)。RTF も A100 世代・CPU (AMD EPYC 7542) 差で絶対値がずれる → **定性 trend (順序関係) の再現で合格**とする
 - **post-filter は訓練不要だが評価のみ**: `reverse_sample(post_filter=fir / None)` の呼び分けで apply/no-apply を出す (T-M3.4)。新規訓練コスト 0
@@ -204,16 +207,20 @@ write_paper_comparison(results)   # → 論文 Table 1〜3 との対比 Markdown
 
 ### 8.1 別の設計を採るとしたら
 
-| 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
+| 別案 | メリット | デメリット | 採否 / 理由 | 再評価トリガー |
 |---|---|---|---|---|
-| **ablation を最初から matrix 設計し M6.1/M6.2 と統合** | 重複訓練を排除 (T=4 / w-sub は本訓練と共有)、起動を 1 系統に | M6.1/M6.2 の責務が膨らむ | M6.1/M6.2 を独立 gate に保つため分離。本チケットは差分セルのみ追加訓練 | 予算確定時に matrix 全体を一括設計し直す |
-| **部分訓練 (500k step) で trend のみ確認** | フル訓練 (410h×4) を回避、相対順序は出る | 絶対値が論文と乖離、未収束 config で trend 逆転リスク | (採用候補) コスト最優先なら本案。trend が不安定なら step 延長 | フル訓練予算が無いとき (= ほぼ常時) |
+| **【M6 レビューで採用昇格】共通 `scripts/orchestrate.py` + `eval/report.py` に乗せる (M6.1/M6.2 と統合)** | `run_ablation.py` が 3 つ目の orchestrator にならない。起動・レポート生成を 1 系統に統一、重複排除 | 共通 orchestrator に config matrix 概念を組み込む必要 | **採用**。M6.1/M6.2 が `scripts/orchestrate.py` / `eval/report.py` を提供する前提でそこに乗せる。T=4 / w-sub は M6.1/M6.2 の本訓練を**再利用 (再訓練不要)** | — (採用済み) |
+| **【M6 レビューで採用昇格】T=4 本訓練 (M6.1) を共有点として 500k 系列を anchor 補正** | 500k の T=2/3/5 と 2M (or full) の T=4 を素の絶対値で同一表に並べると step 差で trend が歪む (T=4 だけ収束が進む) のを防ぐ | 補正ロジック / 注記が必要 | **採用**。「**全セル同一 step に揃える (T=4 も 500k で再測) or step を併記**」のいずれかを必須とし、step 差を隠したまま絶対値比較しない | — (採用済み) |
+| **【M6 レビュー追加】最安 spot を貪欲消費する best-effort batch queue** | ablation 各セルは最も spot 向き (品質より trend が目的で中断・再投入のコスト感度が低い)。最安 spot を貪欲に消費しコストを最小化 | 中断・再投入のハンドリングが必要、wall-clock が読みにくい | **検討**。予算逼迫時の有力な実行形態。on-demand 確保のコストと比較して選択 | spot 価格が大きく振れる / 予算が逼迫したとき |
+| **部分訓練 (500k step) で trend のみ確認** | フル訓練 (410h×4) を回避、相対順序は出る | 絶対値が論文と乖離、未収束 config で trend 逆転リスク (§6.1 の step 非対称) | (採用候補) コスト最優先なら本案。trend が不安定なら step 延長。**ただし wall-clock 等価で揃える** (§6.1) | フル訓練予算が無いとき (= ほぼ常時) |
 | **Optuna / W&B sweep で hyperparameter 探索** | 離散 matrix を超えた最適化、自動 logging | 論文 Table の離散軸 (T=2/3/4/5) と対応しない、計算コスト増 | 本チケットは論文 trend 再現が目的で sweep ではない | 論文外の最適化が必要になったとき |
 | **論文 Table と定量一致を目標化** | 再現の説得力が増す | backend/GPU/MFCC/DTW 差で絶対値一致は非現実的 (T-M4.1 §8.2) | 定性 trend (順序) で十分、絶対値は参考 | 論文著者から測定条件の詳細が得られたとき |
 
 #### 採用設計
-- **既存 `train_*.py` / `evaluate()` を matrix で起動するだけ** (新規ロジックゼロ)
-- **コスト削減時は fixed 500k step 打ち切り** + 定性 trend (順序関係) で合格判定
+- **共通 `scripts/orchestrate.py` + `eval/report.py` に乗せる** (M6.1/M6.2 と統合): `run_ablation.py` を独立 orchestrator にせず、共通 orchestrator + 共通 report 生成器を再利用。新規ロジックは config matrix 定義のみ
+- **T=4 / w-sub は M6.1/M6.2 の本訓練を再利用** (再訓練不要)。追加訓練は差分セル (GAN T=2/3/5、Diff single model) のみ
+- **T=4 本訓練を共有点として 500k 系列を anchor 補正**: 全セル同一 step に揃える (T=4 も 500k で再測) か step を併記し、step 差を隠した絶対値比較を禁止
+- **コスト削減時は fixed step 打ち切りだが wall-clock 等価 / per-config 収束度で揃える** (§6.1) + 定性 trend (順序関係) で合格判定
 - **論文 Table は参考値**、再現の合否は自系列内の相対 trend (T↑で品質↑・RTF↑ 等)
 
 #### 再評価トリガー
@@ -223,6 +230,8 @@ write_paper_comparison(results)   # → 論文 Table 1〜3 との対比 Markdown
 ### 8.2 思想 / 哲学の見直し
 - **粒度**: 任意タスクとして独立は妥当。ただし matrix の T=4 / w-sub は M6.1/M6.2 と共有できるため、追加訓練は T=2/3/5 (GAN) と single model (Diff) の差分セルに限定するのが最小コスト
 - **定性 trend 主軸**: 個人 GPU では論文の絶対値再現は非現実的 (CLAUDE.md「個人 GPU での全モデル本格訓練は非現実的」)。ablation は「論文の主張する trend が再現するか」の定性確認に徹し、絶対値一致は求めない
+- **【M6 レビュー追加】sub-modeling on/off を最優先に (予算逼迫時)**: **sub-modeling on/off** (single model 32h 追加 1 本) が最も安く論文の**核心主張** (`docs/training.md` §6 ablation) を突ける。予算が逼迫したら **T sweep を捨てても sub-modeling ablation だけは残す**優先順位とする。論文の核心主張 (sub-modeling 有無) と二次的 trend (T=2〜5 の単調性) を**区別**し、前者を死守する
+- **【M6 レビュー追加】budget-cap driven な動的 matrix 間引き**: 予算上限を**先に決め**、その範囲で matrix を**動的に間引く**。優先度は sub-modeling > post-filter (訓練不要 = ほぼ無料) > T sweep。上限内に収まるセルだけを実行する
 - **任意性**: 予算次第でスキップ可能。M7 (MOS) は M6.1/M6.2 の default config だけでも実施できるため、本チケットは M7 の前提ではない (best config 選定を高度化するのみ)
 
 ### 8.3 学んだこと (チケット完了後に追記)
@@ -233,12 +242,18 @@ write_paper_comparison(results)   # → 論文 Table 1〜3 との対比 Markdown
 
 ### 9.1 後続チケットに渡す情報
 
+#### T-M6.1, T-M6.2 から受け取る情報 (M6 レビュー追加)
+- **`scripts/orchestrate.py`**: 共通 orchestrator を再利用 (本チケットは独立 orchestrator を作らず config matrix を渡すのみ)
+- **`eval/report.py`**: 共通 report 生成器を再利用 (比較表 / 論文対比レポートをこれに乗せる)
+- **best config / 本訓練 checkpoint**: T=4 (GAN) / w/ sub-modeling (Diff) の本訓練成果物をそのまま比較対象に再利用 (再訓練不要)。500k 系列の anchor 補正の共有点としても使う
+
 #### T-M7.1 (内部 MOS テスト) へ
 - **best config の申し送り**: ablation で選定した best config (品質・RTF のバランスで最良。論文に倣えば GAN T=4〜5 / Diff w/ sub-modeling + post-filter) を主観評価の対象に。比較表 (`eval_results/ablation_comparison.md`) を判断材料として渡す
 - ablation をスキップした場合は M6.1/M6.2 の default config (GAN T=4 / Diff w/ sub-modeling) を best とする
 
 #### ユーザー操作 (必須)
-- **GPU 予算**: ablation は計算コストが大きく (GAN T=2/3/5 追加訓練 + Diff single model 32h)、**優先度は低い**。予算が無ければスキップ。フル訓練が無理なら fixed 500k step 打ち切りを user に提示して GO/NO-GO を仰ぐ
+- **GPU 予算**: ablation は計算コストが大きく (GAN T=2/3/5 追加訓練 + Diff single model 32h)、**優先度は低い**。**budget-cap driven** (予算上限を先に決め matrix を動的に間引く、§8.2)。予算が無ければスキップ。フル訓練が無理なら fixed step 打ち切り (wall-clock 等価、§6.1) を user に提示して GO/NO-GO を仰ぐ
+- **間引き優先度**: **sub-modeling > post-filter > T sweep** (§8.2)。予算逼迫時は T sweep を捨てても sub-modeling ablation を死守。post-filter は訓練不要のためほぼ無料で実行可
 
 #### レポート出力
 - 論文 Table 1〜3 との対比レポートを `eval_results/ablation_comparison.md` (または `docs/`) に出力。fixed step 打ち切りの場合はその旨を明記し absolute 値は参考扱い
