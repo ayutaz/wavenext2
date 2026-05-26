@@ -12,7 +12,7 @@
 | ConvNeXt block 内部 | ✅ 100% |
 | STFT module (Section 3.1) | ✅ 100% |
 | Mel-spec 抽出と log 正規化 | ✅ 100% |
-| Audio 前処理 (sox norm) | ✅ 100% |
+| Audio 前処理 (peak norm = sox norm 等価, §C4) | ✅ 100% |
 | Discriminator / GAN Loss | ✅ 100% |
 | Diff 拡散式 / noise schedule | ✅ 100% |
 | Diff conditioning 注入方式 (additive bias) | ✅ 100% |
@@ -213,7 +213,15 @@ log_mel = torch.log(torch.clamp(mel, min=1e-5))
 
 ### C4. Audio 正規化 [Vocos `vocos/dataset.py` L42-43]
 
+> **実装方針更新 (T-M0.1 / M0 phase review, 2026-05-27)**: torchaudio 2.11 で `sox_effects` が
+> **削除**されたため `apply_effects_tensor` は使用不可。sox `norm -X dB` は「peak を −X dBFS に
+> 正規化」する線形ゲインなので、**`gain = 10**(target_dbfs/20) / wav.abs().max(); wav *= gain`** で
+> **数値的に等価に自前実装**する (configs の `audio_normalization.method: peak_norm`)。意味は不変:
+> train は peak を U(−6,−1) dBFS、val/推論は −3 dBFS。下記コードは原典 (Vocos) の記録として残す。
+> なお `np.random.uniform(-1, -6)` は numpy が範囲指定なので `U(-6,-1)` と同値 (引数順は無関係)。
+
 ```python
+# 原典 (Vocos)。torchaudio 2.11 では下記 sox_effects は使えない → peak_norm で再実装。
 # 訓練
 gain_db = np.random.uniform(-1, -6)
 audio = sox_effects.apply_effects_tensor(audio, sr=24000, effects=[["norm", f"{gain_db:.2f}"]])
@@ -222,7 +230,7 @@ audio = sox_effects.apply_effects_tensor(audio, sr=24000, effects=[["norm", "-3.
 ```
 
 - `float32`, `[-1, 1]`, mono (stereo → `mean(dim=0)`)
-- LUFS 正規化や peak clip は不要 (sox `norm` が peak-based)
+- LUFS 正規化や peak clip は不要 (peak-based 正規化のため)
 
 ### C5. Discriminator 仕様 (WaveFit と同一) [WaveFit-PT `src/model/discriminator.py`]
 - **方式**: **MSD のみ × 3 sub-discriminators** (MelGAN tradition)。**MPD は不使用**

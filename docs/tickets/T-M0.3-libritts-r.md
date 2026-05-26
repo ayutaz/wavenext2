@@ -72,7 +72,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torchaudio
+# 注: torchaudio は使わない (2.11 で load/info 廃止)。音声 I/O は soundfile に統一
 
 
 # TSV columns (header) — T-M2.1 BucketSampler が直接読む
@@ -370,6 +370,11 @@ train-clean-100/103/1240/103_1240_000001_000001.wav	56400	103	1240	2.35	-3.02	-2
 - **別案 G: speaker-disjoint val** (validation 話者を train から完全除外)
   - 採用しなかった理由: **論文は seen-speaker 合成品質を評価** (`docs/training.md` §5.1 参照)。speaker-disjoint は zero-shot TTS 評価向けで本論文の目的とずれる
   - **再評価トリガー: なし** (採用しない方針確定)
+- **別案 H: val の話者内 utterance 選択を「最長」でなく「中央長 (median)」に** (M0 phase review 追加)
+  - 現状実装は各話者から **最長 utterance** を選択 (決定論的・metric 安定狙い)。だが最長 utterance は無音/間が混入しやすく、MCD/UTMOS の分散を増やす恐れ
+  - 代替: duration が median の utterance を選べば話者の「典型的」発話に近く代表性が高い
+  - 採用しなかった理由: 現状は決定論性を優先。実害が出るか未検証
+  - **再評価トリガー: M4 で val の MCD/UTMOS 分散が過大なとき** (`speaker_balanced_sample` の選択キーを差し替えるだけで対応可)
 
 ### 8.2 思想 / 哲学の見直し
 - このサブタスクの粒度は適切 (small)。filelist 生成のみで他要素 (mel 抽出など) を含まないため境界が明確
@@ -411,9 +416,11 @@ train-clean-100/103/1240/103_1240_000001_000001.wav	56400	103	1240	2.35	-3.02	-2
   - 例: `train-clean-100/103/1241/103_1241_000000_000001.wav	72000	103	1241	3.00	-2.15	-21.34`
 - **T-M2.1 (Dataset)**:
   - filelist 読み込み時は `Path(args.src_dir) / row["rel_path"]` で wav 絶対パスを構築
-  - **BucketSampler 実装に `n_samples` 列を使う** (毎 epoch `torchaudio.info` を呼ばない)
-  - **dBFS 統計 (`stats.json`)** で sox `norm` 正規化方針を validate
+  - 音声読み込みは **`soundfile`** (`sf.read`)。torchaudio.load/info は使わない (2.11 で廃止)
+  - **BucketSampler 実装に `n_samples` 列を使う** (毎 epoch ファイルを開かない)
+  - **dBFS 統計 (`stats.json`)** で **peak 正規化** (= sox `norm` 等価) 方針を validate
   - speaker_id 列で M2.6 / M3.5 smoke の speaker-balance チェックを実装可能
+  - **【M0 review 申し送り】min-duration=1.0s (24000 sample) は GAN segment_length 16384 (≈0.68s) より長いが、Diff segment_length 25600 (≈1.067s) より短い**。よって 1.0〜1.067s の train wav は Diff の 1 segment に満たず **反射 pad が必須**。dataset.py は反射 pad → random crop を前提に実装すること (M3 も同様)。
 - **T-M3.4 (Post-filter)**:
   - `data/filelists/dev_postfilter.tsv` (200 utterances) を使う (本チケットで生成済み)
   - 同じスクリプトを M3.4 で再実行しない

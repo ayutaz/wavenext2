@@ -244,6 +244,11 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
 
 ### 8.1 別の設計を採るとしたら
 
+> **M0 phase review (2026-05-27) で §8.1 に昇格した確定方針**:
+> - **soundfile-first I/O**: torchaudio 2.11 の I/O sunset は「代替案」ではなく**確定方針**。音声の load/info/save は soundfile、mel/resample のみ torchaudio。再評価トリガーは「torchaudio が I/O API を再導入し peak-norm/soundfile より明確に優位になったとき」(現状なし)。
+> - **CUDA wheel = cu128 確定**: 下表の「cu126 暫定」は撤回。driver 596.21 / RTX 4070 Ti SUPER で torch 2.11.0+cu128 が動作確認済み。§2.2 雛形の cu126 記述は obsolete (実 `pyproject.toml` は cu128)。
+> - **license = Apache-2.0 確定**: 雛形の MIT は誤り。下表 conda 行の「公開予定 MIT」前提も Apache-2.0 に読み替える。
+
 | 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
 |---|---|---|---|---|
 | **conda + `environment.yml`** | CUDA toolkit ごと conda env に同梱できる | 解決速度が遅い、`pyproject.toml` の標準形式から逸脱、`uv.lock` 相当の lockfile 機構が弱い、`conda-forge` と `pip` のミックスでビルド再現性が落ちる | `docs/implementation-plan.md` §1 で uv 採用を既に決定済み | **再評価しない** (uv 方針を撤回する理由がなければ固定) |
