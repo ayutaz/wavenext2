@@ -108,13 +108,14 @@ scripts/{prepare_libritts.py, extract_mel.py, fit_post_filter.py}
 **Deliverable**: `scripts/prepare_libritts.py` (24 kHz 確認、必要なら resample、wav リストを生成)
 
 - "train-clean-100" + "train-clean-360" + "test-clean" をローカル展開
-- 音声ファイル一覧 (`data/filelists/train.txt`, `val.txt`, `test.txt`) を生成
-- validation は train から 100 utterances を hold-out
+- 音声ファイル一覧 (`data/filelists/{train,val,test,dev_postfilter}.tsv`) + `stats.json` + `audio_info.tsv` を生成 (TSV header 付き)
+- validation は train から speaker-balanced で 100 utterances を hold-out
 
-**Acceptance**:
-- [ ] `train.txt` に約 145k 行 (train-clean-100 + 360 で約 460h)
-- [ ] `test.txt` に 4,824 行
-- [ ] 任意の wav ファイルを `torchaudio.load` で読めて sample_rate=24000 を確認
+**Acceptance** (スクリプト+テスト完成、2026-05-27。実データ実行はユーザー DL 待ち):
+- [x] `scripts/prepare_libritts.py` 実装 + `tests/test_prepare_libritts.py` 9 件 pass (synthetic e2e)
+- [ ] `train.tsv` に約 145k 行 (train-clean-100 + 360 で約 460h) ← 実データ実行で確認
+- [ ] `test.tsv` に約 4,824 行 (openslr `test-clean`) ← 実データ実行で確認
+- [ ] 任意の wav を `soundfile` で読めて sample_rate=24000 を確認 (torchaudio 2.11 で load/info 廃止のため soundfile に統一)
 
 **ユーザー操作** (必須):
 1. LibriTTS-R のライセンス (CC BY 4.0) に同意し、https://www.openslr.org/141/ から `train_clean_100.tar.gz`, `train_clean_360.tar.gz`, `test_clean.tar.gz` をダウンロード

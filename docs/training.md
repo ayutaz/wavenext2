@@ -359,6 +359,13 @@ y_post = np.convolve(y_synth, fir, mode="same")
 
 ## 5. 評価プロトコル (Section 4)
 
+> **test split 表記について (T-M0.3 で解決, 2026-05-27)**: 論文は評価セットを
+> "test-clean-100" (4,824 utterances) と表記するが、openslr/141 の LibriTTS-R 配布に
+> "test-clean-100" という split は存在しない。実装では openslr 公式の **`test-clean`** split
+> (`scripts/prepare_libritts.py` が `test.tsv` を生成) を使用する。論文の "test-clean-100" は
+> この `test-clean` を指すものと解釈 (件数 4,824 が一致)。paper-summary.md / open-questions.md の
+> "test-clean-100" は論文引用なので原文のまま残す。
+
 ### 5.1 主観評価
 - MOS (5-point scale)
 - 20 名のネイティブ英語話者 (有償)

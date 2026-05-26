@@ -3,11 +3,11 @@ id: T-M0.3
 title: LibriTTS-R 取得と filelist 生成
 milestone: M0
 phase: M0
-status: pending
+status: in_review
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.1, T-M0.2]
 blocks: [T-M2.1, T-M5.1, T-M5.2]
 related_docs:
@@ -47,8 +47,8 @@ LibriTTS-R (CC BY 4.0) の "train-clean-100" + "train-clean-360" + "test-clean" 
 - [ ] `data/filelists/stats.json` (speaker / chapter / duration / dBFS 分布) が生成される
 - [ ] `data/filelists/audio_info.tsv` (全 wav の sr / channels / duration) が生成される
 - [ ] `LICENSE-LibriTTS-R.md` をリポジトリ ROOT に配置
-- [ ] 任意の wav を `torchaudio.load` で読めて `sample_rate == 24000` であることを全件検証 (`audio_info.tsv` 経由)
-- [ ] train / val / dev_postfilter / test に重複がないこと (set 比較) をスクリプト内で assert
+- [ ] 任意の wav を `soundfile` (`sf.info` / `sf.read`) で読めて `sample_rate == 24000` であることを全件検証 (`audio_info.tsv` 経由)。**torchaudio 2.11 で `load`/`info` が廃止されたため soundfile に統一** (T-M0.1 §9.1)
+- [x] train / val / dev_postfilter / test に重複がないこと (set 比較) をスクリプト内で assert (synthetic e2e で検証済)
 
 ## 2. 実装内容の詳細
 
@@ -284,14 +284,14 @@ train-clean-100/103/1240/103_1240_000001_000001.wav	56400	103	1240	2.35	-3.02	-2
 - [ ] `sorted(val_paths_hash) == EXPECTED_HASH` でスナップショット検証 (テストで担保、変更検知)
 - [ ] 全 wav のうち sample_rate=24000 でないものが 0 件 (`audio_info.tsv` から確認)
 - [ ] `LICENSE-LibriTTS-R.md` がリポジトリ ROOT に存在
-- [ ] 任意の wav ファイルを `torchaudio.load` で読めて `sample_rate=24000` を確認 (`docs/milestones.md` §M0.3 既存項目)
+- [ ] 任意の wav ファイルを `soundfile` で読めて `sample_rate=24000` を確認 (torchaudio 2.11 で load/info 廃止のため soundfile に統一)
 
 ## 6. 懸念事項
 
 ### 6.1 技術的リスク
 
-#### critical
-- **test-clean vs test-clean-100 の表記揺れ**: `docs/training.md` §5.1 / §5.3 で「test-clean-100」と表記されているが、LibriTTS-R の openslr 公式 split は `test_clean.tar.gz` (~4,837 utterances)。「test-clean-100」は別物 (元 LibriTTS subset?) の可能性。**本チケット実装時に論文 §4.1 / Table 1 を再確認し、正しい split 名を確定**。openslr 公式 = `test-clean` 4,824 行で進めるが、必要なら `docs/training.md` 修正を T-M0.3 完了報告で提案する
+#### critical → ✅ 解決 (2026-05-27)
+- **test-clean vs test-clean-100 の表記揺れ**: openslr/141 に "test-clean-100" split は存在せず、公式は `test-clean`。**実装は `TEST_SUBSET = "test-clean"` で確定**。論文の "test-clean-100" (4,824 utt) はこの `test-clean` を指すと解釈 (件数一致)。`docs/training.md` §5 冒頭に明確化注記を追加済み。paper-summary.md / open-questions.md の "test-clean-100" は論文引用なので原文保持。**論文 PDF が手元になく Table 1 の厳密確認は未了** → PDF 入手時に再確認 (現状の解釈で実害なし、§9.4 参照)。
 
 #### 追加 (3 視点レビュー)
 - **LibriTTS vs LibriTTS-R 混同リスク**: openslr/60 (LibriTTS) と openslr/141 (LibriTTS-R) を取り違える事故 → `--src-dir` バリデーションで `README.md` 内の "LibriTTS-R" 文字列確認
@@ -385,9 +385,21 @@ train-clean-100/103/1240/103_1240_000001_000001.wav	56400	103	1240	2.35	-3.02	-2
 - **Common Voice**: より多言語、品質はやや劣る
 - いずれも論文と異なるため M0 では採用しないが、M6 以降で「他データセットでの再現性」を見るときに使えるかもしれない
 
-### 8.4 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未記入)
-- 次の似たタスクで応用できる教訓: (未記入)
+### 8.4 学んだこと (2026-05-27 実装後に追記)
+
+実装結果:
+- `scripts/prepare_libritts.py` 実装 + `tests/test_prepare_libritts.py` (9 件 pass)。`run()` をコア関数化し CLI `main()` から分離 → テストが実データ無しで合成ツリーに対し e2e 実行可能。
+- 検証: filter_duration / speaker_balanced_sample / compute_dbfs の unit、合成 LibriTTS-R ツリー (6 spk + short/long + test 4) での e2e (件数・header・重複なし・相対 POSIX path・stats schema・val_hash 再現性)。
+
+想定外と対処:
+1. **音声 I/O は soundfile に統一** (torchaudio 2.11 で `load`/`info`/`sox_effects` 廃止、T-M0.1 §9.1)。`sf.info` で sr/frames、`sf.read` で peak/RMS dBFS。当初設計の `torchaudio.load`/`torchaudio.info` は使わない。
+2. **"発話数最多の wav" の曖昧さ**: 「各話者から 1 件」の選択規則が曖昧だったため、**最長 utterance (n_samples 最大、tie-break rel_path)** に確定 — 決定論的で metric も安定。seed は話者選択のみに作用。
+3. **test-clean-100 表記揺れ解決**: openslr 実 split は `test-clean`。§6.1 参照。
+4. **`scripts/` は package でない** ため、テストからは `importlib.util.spec_from_file_location` でパス指定 import。`sys.path` 汚染を最小化。
+
+次の似たタスクで応用できる教訓:
+- **コア関数 (`run`) と CLI (`main`) を分離**すると、外部データに依存する処理でも合成 fixture で完全な e2e テストが書ける。
+- **val 選択は hash で snapshot 化** (`val_hash`)。実データ投入後に `stats.json.val_hash` を固定値テストに昇格すれば変更検知になる (現状は synthetic での再現性のみ検証)。
 
 ## 9. 後続タスクへの連絡事項
 
@@ -433,5 +445,6 @@ train-clean-100/103/1240/103_1240_000001_000001.wav	56400	103	1240	2.35	-3.02	-2
   - [ ] (必要時) `docs/training.md` §5.1 / §5.3 の「test-clean-100」表記揺れ修正 (実装時に論文 §4.1 / Table 1 再確認の上)
 
 ### 9.4 Open question として残ったもの
-- **huggingface mirror の存在確認**: `mythicinfinity/libritts_r` 等の mirror が実際に存在し authentication なしで DL 可能か未確認。確認できれば `docs/open-questions.md` に追記し、`--download` flag を別チケットで実装する余地あり
-- **`docs/training.md` の test split 表記** ("test-clean-100" vs "test-clean"): 本チケット実装時に論文 §4.1 / Table 1 で再確認し、必要なら修正提案
+- **実データ実行はユーザー DL 待ち**: スクリプト + テストは完成し synthetic で検証済だが、実際の `train.tsv` (~145k 行) / `test.tsv` (~4,824 行) / `val_hash` 固定値は **ユーザーが LibriTTS-R を DL し `uv run python scripts/prepare_libritts.py --src-dir <path>` を実行**するまで生成されない。本チケットを `in_review` とし、実データ実行後に `completed` へ。
+- **test split 表記** ("test-clean-100" vs "test-clean"): ✅ 実装は `test-clean` で確定 (§6.1)。論文 PDF が手元にないため Table 1 の厳密確認のみ未了 — 現解釈で実害なし、PDF 入手時に再確認。
+- **huggingface mirror の存在確認**: `mythicinfinity/libritts_r` 等が認証なし DL 可能かは未確認 (本チケットは openslr 手動 DL 前提を維持)。確認できれば `--download` flag を別チケットで追加する余地あり。

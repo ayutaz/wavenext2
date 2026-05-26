@@ -10,7 +10,7 @@
 
 | マイルストーン | チケット数 | pending | in_progress | in_review | completed | フェーズレビュー |
 |---|---|---|---|---|---|---|
-| M0 | 3 | 1 | 0 | 0 | 2 | ✅ 2026-05-26 |
+| M0 | 3 | 0 | 0 | 1 | 2 | ✅ 2026-05-26 |
 | M1 | 6 | 6 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M2 | 6 | 6 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M3 | 5 | 5 | 0 | 0 | 0 | ✅ 2026-05-26 |
@@ -18,7 +18,7 @@
 | M5 | 2 | 2 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M6 | 3 | 3 | 0 | 0 | 0 | ✅ 2026-05-27 |
 | M7 | 1 | 1 | 0 | 0 | 0 | ✅ 2026-05-27 |
-| **計** | **29** | **27** | **0** | **0** | **2** | 全 8 フェーズ完了 |
+| **計** | **29** | **26** | **0** | **1** | **2** | 全 8 フェーズ完了 |
 
 > **チケット作成ステータス**: 全 29 チケットが作成済み + フェーズレビュー (architect / ML / DevOps の 3 視点) 完了。`status` 列の `pending` は **実装着手前** を意味し、チケット文書自体は完成している。
 
@@ -30,7 +30,7 @@
 |---|---|---|---|---|---|
 | T-M0.1 | [Python 環境](T-M0.1-python-env.md) | S | ✅ | — | claude |
 | T-M0.2 | [ディレクトリ scaffold](T-M0.2-scaffold.md) | S | ✅ | — | claude |
-| T-M0.3 | [LibriTTS-R 取得](T-M0.3-libritts-r.md) | S | 📝 | T-M0.1, T-M0.2 | — |
+| T-M0.3 | [LibriTTS-R 取得](T-M0.3-libritts-r.md) | S | 🔍 | T-M0.1, T-M0.2 | claude |
 
 ## M1: コア部品 (sub-model 構成要素)
 
@@ -103,7 +103,7 @@
 
 | マイルストーン | 完了日 | レビュー実施日 | 主な更新点 |
 |---|---|---|---|
-| M0 | — | 2026-05-26 | `src/wavenext2/` パッケージ化採用 (T-M0.2)、scaffold で Docker/CI/pre-commit/`.gitattributes`/`.env.example` stub を commit (T-M0.2)、filelist を TSV header 付き化 + speaker-balanced val + `dev_postfilter.tsv` 同時生成 + stats.json/audio_info.tsv 出力 (T-M0.3)、再現性関連リスク 6 件追加 (T-M0.1)、Critical: docs/training.md の `test-clean-100` 表記揺れを T-M0.3 実装時に解決予定 |
+| M0 | — | 2026-05-26 | `src/wavenext2/` パッケージ化採用 (T-M0.2)、scaffold で Docker/CI/pre-commit/`.gitattributes`/`.env.example` stub を commit (T-M0.2)、filelist を TSV header 付き化 + speaker-balanced val + `dev_postfilter.tsv` 同時生成 + stats.json/audio_info.tsv 出力 (T-M0.3)、再現性関連リスク 6 件追加 (T-M0.1)、~~Critical: `test-clean-100` 表記揺れ~~ → ✅ 解決 (2026-05-27): 実装は openslr `test-clean` で確定、training.md に注記 |
 | M1 | — | 2026-05-26 | T-M1.1 `forward(x, *, cond=None)` keyword-only 確定 + `fc_t.bias=0` zero init、T-M1.2 dynamic range mismatch (critical) + iSTFT 予約、T-M1.3 `eps=1e-7` Vocos 互換 (暫定) + precompute 設計、T-M1.4 `enable_grad_ckpt` / `final_activation` / `block_factory` 引数化 + `linear_2` clip 飽和懸念、T-M1.5 `c * 1000` rescale (M3 smoke 最優先 ablation) + `fc1.bias=0` 検討、T-M1.6 **Critical** 戻り値仕様 (n_t vs y_{t-1}) を実装時に再確認 + `from_config()` factory 採用、横断: `tests/conftest.py` fixture 戦略を T-M0.2 へ申し送り |
 | M2 | — | 2026-05-26 | T-M2.1 `Batch` TypedDict + `worker_init_fn` snippet + `MelOnGPU` 予約、T-M2.2 `DiscriminatorOutput` NamedTuple + defensive `unsqueeze(1)` + API 非依存 weight_norm test、T-M2.3 `compute_total_loss` を `(total, unweighted_dict)` tuple 化 + `sorted(losses.keys())` 順序固定 + MR-STFT を M3/M4 で再利用、T-M2.4 **`return_intermediates=True` を v1 から導入** + atomic `best.pt` rename + `BaseVocoder` 抽出を M3.1 着手前判断、T-M2.5 **`train_gan_step` 公開関数化** + SIGTERM/SIGINT handler + 決定論性 env、T-M2.6 pytest single-source + synthetic CPU smoke を nightly CI |
 | M3 | — | 2026-05-26 | **T-M3.3 CRITICAL: β_t 負値問題発見** (`β[1]=1-2.8e-2/1e-4=-279` → `1/√(1-β)` で NaN 必発、論文 4 点 schedule は連続 DDPM のサブサンプリングで隣接 β 無意味 → α_t + skip-aware σ で書き換え必須)、T-M3.1 `from_config(only_sub_model=k)` lazy 化 + `synthesize` alias、T-M3.2 bf16 で c 精度 fp32 強制 + 3-point validation + `c_rescale` 切替、T-M3.4 `apply_post_filter` を `reverse_sample` 引数統合 + torch/numpy 両受け + `fir.npy` commit 化、T-M3.5 **sub-model 4 を primary smoke に昇格** (conditioning 感度 ~70 倍) + mock reverse で β 問題早期検知 |
