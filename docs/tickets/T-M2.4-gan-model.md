@@ -36,7 +36,9 @@ related_docs:
 
 ### ゴール
 - [ ] `src/wavenext2/models/gan_wavenext2.py` に `GANWaveNext2(nn.Module)` クラスが実装され、`T=4` で `~59.94M` params (Table 1 整合) を持つ
-- [ ] `forward(mel, audio_length)` (または `forward(mel, x_gt)`) が `(B, T_audio)` を返し、内部で `y_T = torch.zeros(...)` 初期化 + 逆順 `for t in range(T, 0, -1)` の fixed-point iteration を実行
+- [ ] `forward(mel, audio_length=None, return_intermediates=False)` が `(B, T_audio)` (default) または `list[Tensor]` 長さ T+1 (return_intermediates=True) を返し、内部で `y_T = torch.zeros(...)` 初期化 + 逆順 `for t in range(T, 0, -1)` の fixed-point iteration を実行
+- [ ] **`return_intermediates: bool = False` を v1 から導入**: `True` のとき `[y_T, y_{T-1}, ..., y_0]` の (T+1) 要素 list を返す (T-M2.5 で中間 y_t も loss 対象にする論文 §3.2 / Fig 1a の WaveFit ベース設計の核心、§6.1 critical 参照)
+- [ ] **`audio_length=None` で auto-infer** (`mel.shape[2] * self.hop_length`) をサポートし、`x_gt.shape[-1]` を渡す T-M2.5 と shape mismatch を起こさない
 - [ ] T-M1.6 で確定する **SubModelGAN の戻り値仕様 (n_t vs y_{t-1})** に従い `y` 更新式を pin (実装時点で `docs/architecture.md` §2 + `docs/training.md` §2 を再読して確定)
 - [ ] `enable_grad_ckpt=True` を `__init__` 引数で受け取り、T 個の各 sub-model へ propagation
 - [ ] forward + backward が動作し、すべての T 個 sub-model の全パラメータに grad が流れる
@@ -120,53 +122,74 @@ class GANWaveNext2(nn.Module):
     def forward(
         self,
         mel: torch.Tensor,
-        audio_length: int,
-    ) -> torch.Tensor:
+        audio_length: int | None = None,
+        return_intermediates: bool = False,
+    ) -> torch.Tensor | list[torch.Tensor]:
         """Fixed-point iteration による波形合成.
 
         Args:
-            mel:          (B, 128, T_mel) log-mel-spectrogram.
-            audio_length: 出力波形長 (= T_mel * hop_length)。呼び出し側で計算して渡す。
+            mel:                  (B, 128, T_mel) log-mel-spectrogram.
+            audio_length:         出力波形長 (= T_mel * hop_length)。
+                                   `None` のとき `mel.shape[2] * self.hop_length` で auto-infer
+                                   (T-M1.3 で center=True 整合性確定後に式を再評価)。
+            return_intermediates: `False` (default) → 最終 `y_0` のみ。
+                                   `True` → `[y_T, y_{T-1}, ..., y_0]` の (T+1) 要素 list。
+                                   T-M2.5 の fixed-point iteration loss (中間 y_t も loss 対象)
+                                   に必須 (論文 §3.2 / Fig 1a の WaveFit ベース設計の核心、§6.1 critical 参照)。
 
         Returns:
-            (B, audio_length) 合成波形 y_0 ∈ [-1, 1].
+            (B, audio_length) 合成波形 y_0 ∈ [-1, 1] (return_intermediates=False).
+            または `list[Tensor]` 長さ T+1 (return_intermediates=True), 全要素 (B, audio_length).
 
         Algorithm:
             y_T = torch.zeros(B, audio_length)                # 論文: initial input noise isn't required
+            (intermediates = [y_T])                            # return_intermediates=True 時のみ
             for t in range(T, 0, -1):
                 out = self.sub_models[t-1](mel, y)
                 # T-M1.6 で確定する戻り値仕様に従い、以下のいずれかを採用:
                 #   (A) out = n_t (ノイズ residual)  → y = y - out
                 #   (B) out = y_{t-1} (denoised wave) → y = out
                 # ※ 実装時に §6.1 critical を解決して pin、却下案は §8 に残す。
-            return y                                           # y_0
+                (intermediates.append(y))                      # return_intermediates=True 時のみ
+            return y                                           # または intermediates
         """
         # Shape validation
         if mel.dim() != 3:
             raise ValueError(f"mel must be (B, 128, T_mel), got {tuple(mel.shape)}")
         B, _, T_mel = mel.shape
         expected = T_mel * self.hop_length
-        if audio_length != expected:
+        if audio_length is None:
+            audio_length = expected  # auto-infer (T-M1.3 で center=True 整合性確定後に再評価)
+        elif audio_length != expected:
             raise ValueError(
                 f"audio_length ({audio_length}) must equal T_mel * hop_length "
                 f"({T_mel} * {self.hop_length} = {expected})"
             )
 
         y = torch.zeros(B, audio_length, device=mel.device, dtype=mel.dtype)
+        intermediates: list[torch.Tensor] = [y] if return_intermediates else []
         # 逆順イテレーション (t = T → 1)。sub_models は 0-indexed なので t-1 で参照。
         for t in range(self.T, 0, -1):
+            # gradient checkpointing は T 毎に挟む設計 (§8.1 案 5、use_reentrant=False)
             out = self.sub_models[t - 1](mel, y)
             # === T-M1.6 確定後に置換 ===
-            # (A) out = n_t →  y = y - out
+            # (A) out = n_t →  y = y - out  (※ 実装時に sub-model 側 clip を外す or ここで clip)
             # (B) out = y_{t-1} → y = out
             y = self._residual_update(y, out)
-        return y
+            if return_intermediates:
+                intermediates.append(y)
+        return intermediates if return_intermediates else y
 
     def _residual_update(self, y: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         """sub-model 出力で y を更新する単一情報源 (SoT).
 
         T-M1.6 critical 解決後、ここに (A) `return y - out` または (B) `return out` を pin する。
         テスト (test_residual_update_semantics) でこの実装を検証。
+
+        Note (§8.1 案追加): T-M1.6 の戻り値仕様が実装時にまだ未確定なら、本 method を
+        `Callable[[Tensor, Tensor], Tensor]` 引数として `__init__` で受け取り、A/B 両方を
+        unit test fixture で差し替え可能にする選択肢もあり (critical の解決を後送りでき、
+        CI が grey にならない)。本チケット v1 では method 直接実装、後送りは §8 検討。
         """
         # === 実装時に T-M1.6 SubModelGAN docstring + docs/architecture.md §2 を再読して確定 ===
         raise NotImplementedError(
@@ -231,11 +254,13 @@ class GANWaveNext2(nn.Module):
 ### In Scope
 - `class GANWaveNext2(nn.Module)` の実装
 - T 個の `SubModelGAN` を `nn.ModuleList` で保持 (重み非共有)
-- `forward(mel, audio_length)` の fixed-point iteration (逆順 T → 1)
+- `forward(mel, audio_length=None, return_intermediates=False)` の fixed-point iteration (逆順 T → 1)
+  - **`return_intermediates: bool = False` 引数を v1 から導入** (§8.1 採用昇格、§6.1 critical 参照)
+  - **`audio_length=None` で auto-infer** (`mel.shape[2] * self.hop_length`)
 - 初期 `y_T = torch.zeros(...)` の生成
 - `enable_grad_ckpt` 引数 + 各 sub-model への propagation
 - `_residual_update(y, out)` メソッドに T-M1.6 確定の戻り値仕様を pin
-- shape 検証 (`mel.dim() == 3`, `audio_length == T_mel * hop_length`)
+- shape 検証 (`mel.dim() == 3`, `audio_length == T_mel * hop_length` or `None`)
 - `tests/test_gan_wavenext2.py` (5.1 / 5.3 すべて)
 - パラメータ数検証テスト (T=1, 2, 3, 4, 5 すべて)
 - `__init__.py` への `__all__` 追加
@@ -248,9 +273,10 @@ class GANWaveNext2(nn.Module):
 - 推論専用 API (推論時も `forward` を流用、別 API は不要)
 - post-filter (Diff のみ、T-M3.4)
 - mixed precision / torch.compile (M5 / M6 で必要時)
-- 中間 `y_t` の loss 計算 / stop_gradient 制御 (T-M2.5 で `loss_intermediates` 引数を追加する設計予定、本チケットでは forward は最終 `y_0` のみ返す)
+- 中間 `y_t` の loss 計算 / stop_gradient 制御 (T-M2.5 の責務; 本チケットは `return_intermediates=True` で list を返すまでに留め、loss 設計と stop_gradient 挿入は T-M2.5)
 - ablation 実験スクリプト (T-M6.3)
 - LibriTTS-R real audio との e2e (T-M5.1 で 1 epoch smoke)
+- `BaseVocoder` / `IterativeVocoder` 親クラス抽出 (T-M3.1 着手前に判断、§8.2 参照)
 
 ### Deliverable
 - ファイル:
@@ -305,6 +331,21 @@ class GANWaveNext2(nn.Module):
 #### Residual update semantics (T-M1.6 確定後)
 - [ ] `test_residual_update_semantics`: `_residual_update(y, out)` の振る舞いが T-M1.6 確定パターンと一致 (e.g., パターン (A) なら `_residual_update(y, out) == y - out`)
 
+#### `return_intermediates` (v1 必須)
+- [ ] `test_return_intermediates`: `return_intermediates=True` で `[y_T, y_{T-1}, ..., y_0]` 長さ (T+1) の list が返り、各 shape が `(B, audio_length)` で一致
+- [ ] `test_return_intermediates_T4`: T=4 で list 長さ == 5、`out[0]` が `torch.zeros` (= y_T)、`out[-1]` が最終 y_0 (= `forward(..., return_intermediates=False)` の出力と allclose)
+- [ ] `test_return_intermediates_grad_flow`: `return_intermediates=True` で取った各中間 y_t に対し `y_t.sum().backward(retain_graph=True)` で対応する sub-model の全 param に grad が流れる (中間 y_t loss 対象設計の動作確認)
+
+#### `audio_length=None` auto-infer
+- [ ] `test_audio_length_auto_infer`: `audio_length=None` で呼んだ結果が `audio_length=T_mel*hop_length` 明示渡しと allclose
+- [ ] `test_audio_length_x_gt_compat`: T-M2.5 想定の `x_gt.shape[-1]` を渡しても、auto-infer 結果と一致する (`x_gt.shape[-1] == T_mel * hop_length` の前提)
+
+#### T=1 clip range (パターン A 採用時の懸念解消)
+- [ ] `test_T1_clip_range`: T=1 で `y_0` が `[-1, 1]` を維持する設計を pin。
+  - パターン (A) 採用なら sub-model 戻り値 `n_T` は clip(-1,1) しない設計 (residual はそのスケール外を取りうる) で、本チケットの `_residual_update` または return 直前で `y.clamp(-1, 1)` を行う
+  - パターン (B) 採用なら sub-model が clip(-1,1) で `y_0` も `[-1, 1]`、追加 clip 不要
+  - assertion: `assert y_0.min() >= -1.0 and y_0.max() <= 1.0` (パターンに関わらず満たすこと)
+
 ### 5.2 e2e / 結合テスト
 - [ ] `test_gan_wavenext2_with_real_sub_model_cfg`: `configs/gan_wavenext2.yaml` の sub_model_cfg を読んで `GANWaveNext2.from_config(...)` 経由 (factory 追加した場合) で生成、forward が動作 (T-M2.5 の YAML 読み込み経路を模す)
 - [ ] `test_module_list_independence`: `model.sub_models[0]` と `model.sub_models[1]` が **異なるオブジェクト** であり、片方の weight 変更がもう片方に伝播しないこと
@@ -351,6 +392,25 @@ class GANWaveNext2(nn.Module):
   6. もう一方のパターンを §8 に **却下根拠付きで残す**
 - **未解決のまま実装すると**: 訓練が divergent (loss が下がらない、または NaN) で M2.6 smoke が通らない
 
+#### CRITICAL (追加): T=1 degenerate test の clip 範囲問題 (パターン A 採用時)
+
+- **問題**: §6.1 critical で確定する戻り値仕様が **パターン (A) (residual n_t)** の場合、T=1 で `y_0 = zeros - n_T = -n_T` となる。sub-model 内の clip(-1,1) は **denoised output** に対するものなので、residual `n_t` はそのスケール外を取りうる
+  - 例: 真の波形が `[-0.5, 0.5]` 範囲なら `n_T = zeros - y_0 = [0.5, -0.5]` で範囲内だが、`n_T` が `[-1.5, 1.5]` に達することも構造上ありうる
+  - その場合 `test_T1_equals_single_sub_model` / `test_forward_output_range` の `assert y_0 ∈ [-1, 1]` が **成立しない懸念**
+- **解決策 (パターン (A) 採用時)**:
+  - (a) sub-model 側 clip(-1,1) を外し、本チケットの `_residual_update` 内 (= `return y - out`) または return 直前で `y.clamp(-1, 1)` を行う設計に変更
+  - (b) T-M1.6 の sub-model docstring を「`n_t` は無制約 (clip なし)」と pin、本チケットで `y.clamp(-1, 1)` を return 前に挿入
+- **解決策 (パターン (B) 採用時)**: sub-model が `y_{t-1}` を直接出力し clip(-1,1) を内部で行うため、本チケットで追加 clip 不要
+- **本チケット実装着手時の MUST DO**: §6.1 critical 解決後、パターンに応じて clip 位置を決定し `test_T1_clip_range` で動作確認
+
+#### CRITICAL (追加, Critical 寄り): `best.pt` race condition (T-M2.5 への要請)
+
+- **問題**: val improvement 頻発期 (M5.1 1 epoch では起きやすい) に複数プロセス / 複数 step が `best.pt` を同時書き込みすると **破損 / 部分書き込み** リスク
+- **責務分離**: 本チケットは model 実装のみ、checkpoint 保存は T-M2.5 だが **本チケット §9 から明示要請**:
+  - **atomic rename pattern**: `torch.save(state, "best.pt.tmp")` → `os.replace("best.pt.tmp", "best.pt")` (`os.replace` は POSIX/Windows 共通でアトミック)
+  - DDP / multi-process では rank0 のみが書き込む `if rank == 0:` ガード必須
+  - 48000 ファイル checkpoint 削除のレース (2M step で 10k step ごと save = 200 ckpt、`keep_last_n=5` で削除する際の filesystem race) も同様に rank0 only で対応
+
 #### 通常項目
 
 - **T 個直列の OOM リスク** (M2 phase):
@@ -358,6 +418,7 @@ class GANWaveNext2(nn.Module):
   - A100 40GB では T=4 で問題なく動作 (HiFi-GAN / WaveFit 慣例)
   - 24GB GPU (RTX 3090 / 4090) では **borderline**。`enable_grad_ckpt=True` で T-M1.4 の checkpoint を経由してメモリ削減 (一般に 20〜40% 削減期待)
   - **対応**: `enable_grad_ckpt=True` を smoke 失敗時に first action として有効化、`memray` でメモリ profiling
+  - **代替**: `torch.utils.checkpoint.checkpoint(..., use_reentrant=False)` を **T 毎の sub-model 呼び出しで挟む** (§8.1 採用昇格)。PyTorch 2.10+ で安定し、`checkpoint_sequential` より柔軟 (M6 OOM 対策の現実解)
   - **検知**: M2.6 smoke / M5.1 1 epoch で OOM ログを `torch.cuda.OutOfMemoryError` で捕捉
 
 - **T 個 sub-model の重み独立 vs shared** (論文 Table 1 で確定済):
@@ -367,10 +428,10 @@ class GANWaveNext2(nn.Module):
   - shared 案は §8 で却下根拠を明示
 
 - **fixed-point iteration の loss 設計 (中間 y_t の扱い)** (T-M2.5 で実装):
-  - `docs/training.md` §2.1 では `loss_G = MR-STFT(y_0) + λ_adv * adv(y_0) + λ_fm * fm(y_0)` と **y_0 のみ** が loss 対象
-  - 中間 `y_t (t > 0)` を loss 対象にする場合、stop_gradient を適切に挿入しないと勾配が T 倍に増幅 (連鎖 backward の累積)
-  - **本チケットは forward を pure な逐次 sub-model 適用** とし、loss 設計は T-M2.5 に委譲
-  - 中間 y_t を返す option (`return_intermediates: bool`) を将来追加する場合は T-M2.5 で要請を受けた時に追加 (本チケット §8 で保留)
+  - **本チケット v1 で `return_intermediates: bool = False` を導入** (§8.1 採用昇格)。論文 §3.2 / Fig 1a の WaveFit ベース fixed-point iteration では中間 y_t に loss をかけないと sub-model 間の役割分担が崩れる (全 sub-model が「最終 y_0 に向かう」最適化になり residual denoising 構造が失われる)
+  - `docs/training.md` §2.1 の式 `loss_G = MR-STFT(y_0) + λ_adv * adv(y_0) + λ_fm * fm(y_0)` は **y_0 のみ** だが、中間 y_t loss を取らないと WaveFit-original の挙動と乖離 (T-M2.5 で再評価)
+  - 中間 `y_t (t > 0)` を loss 対象にする場合、stop_gradient を適切に挿入しないと勾配が T 倍に増幅 (連鎖 backward の累積) → **本チケットの forward は intermediates list を返すのみ、stop_gradient 挿入は T-M2.5 の責務**
+  - T-M2.5 で必要になってから戻すのは遅い (API change で migration cost) ため、本チケット v1 で対応
 
 - **`audio_length` の center=True 整合性** (T-M1.6 §6.1 critical から伝搬):
   - `torch.stft(center=True)` で `T_mel = floor(T_audio / hop) + 1` の規約により `T_audio = (T_mel - 1) * hop_length` の可能性
@@ -462,6 +523,27 @@ class GANWaveNext2(nn.Module):
     - (d) 逆順 iteration は `docs/training.md` §2.1 / `docs/architecture.md` §2 で確定
     - (e) `_residual_update` を独立 method にすることで、(A) / (B) パターン切り替え時の変更箇所が **1 行に局所化**
 
+- **`return_intermediates: bool = False` 引数を v1 から導入** (採用昇格 / 重要):
+  - 理由: 論文 §3.2 / Fig 1a の WaveFit ベース fixed-point iteration では、中間 y_t に loss をかけないと sub-model 間の役割分担が崩れる (全 sub-model が「最終 y_0 に向かう」最適化になり residual denoising 構造が失われる)
+  - `forward(mel, audio_length=None, return_intermediates=False)` で `False` のとき y_0 のみ、`True` のとき `[y_T, y_{T-1}, ..., y_0]` (長さ T+1) を返す
+  - T-M2.5 で必要になってから戻すのは遅い (API change で migration cost)、本チケット v1 で対応
+  - 副作用: API が広がるが、default が False のため既存呼び出しは無変更
+
+- **`audio_length=None` で auto-infer** (採用昇格):
+  - `mel.shape[2] * self.hop_length` または `(mel.shape[2] - 1) * hop_length` を default (T-M1.3 center=True 整合性確定後に式を pin)
+  - T-M2.5 が `x_gt.shape[-1]` を渡す現状設計で shape mismatch リスク減
+  - 明示的に `audio_length` を渡すケース (推論時の任意長合成) も従来通り動く
+
+- **`checkpoint(..., use_reentrant=False)` を T 毎に挟む** (採用昇格):
+  - PyTorch 2.10+ で安定、`checkpoint_sequential` より柔軟 (`nn.ModuleList` で直接利用可能)
+  - M6 OOM 対策の現実解 (T-M1.4 block 内 checkpoint と組み合わせて memory 削減を多段化可能)
+  - `enable_grad_ckpt=True` のとき本チケット forward 内でも `torch.utils.checkpoint.checkpoint(self.sub_models[t-1], mel, y, use_reentrant=False)` を呼ぶ実装に拡張
+
+- **`_residual_update` を `Callable[[Tensor, Tensor], Tensor]` 引数化** (検討追加):
+  - T-M1.6 戻り値仕様 (A 説 n_t / B 説 y_{t-1}) が実装時に未確定なら、両方の callable を unit test で fixture 化して critical 解決を後送り可能
+  - CI が grey にならない (テストで A/B 両方を差し替え実行可能)
+  - 採用条件: T-M1.6 が本チケット着手時に未確定の場合のみ、本チケットの `__init__(..., residual_update_fn: Callable | None = None)` を追加し、`None` のとき method デフォルトを使用
+
 #### Deprecated (却下案)
 
 1. **shared sub-model (T 個で同じパラメータ使い回し)**
@@ -484,16 +566,15 @@ class GANWaveNext2(nn.Module):
 5. **forward を `torch.utils.checkpoint.checkpoint_sequential` で 4 segment 化**
    - メリット: T-M1.4 の `enable_grad_ckpt` (block 内 checkpoint) と組み合わせて activation memory を更に削減
    - 却下 (本チケット v1): `checkpoint_sequential` は `nn.Sequential` 専用で `nn.ModuleList` で使うには wrapper が必要、複雑度増加
-   - **将来検討**: M5.1 / M6.1 で OOM が出た場合に `enable_grad_ckpt_sequential: bool` 引数を追加。**M5 phase review で再評価**
+   - **採用代替**: `torch.utils.checkpoint.checkpoint(sub_model, mel, y, use_reentrant=False)` を T 毎に直接挟む方式を採用昇格 (上記「採用設計」参照)。`checkpoint_sequential` より柔軟
 
 6. **`forward(mel)` のみで内部で `audio_length = mel.shape[2] * self.hop_length` 計算**
    - メリット: 呼び出し側の負担減、shape mismatch リスク減
-   - 部分採用候補: 本チケット v2 で `audio_length: int | None = None` (None なら自動計算) に拡張可能
-   - **現状 v1 では `audio_length: int` 必須**、T-M1.3 / T-M1.6 で center=True 整合性が確定したら省略可能化を検討
+   - **採用昇格**: 本チケット v1 で `audio_length: int | None = None` (None なら自動計算) を採用 (上記「採用設計」参照)。T-M2.5 が `x_gt.shape[-1]` を渡す現状設計で shape mismatch リスク減
 
 7. **forward が中間 `y_t (t=1..T-1)` も `list[torch.Tensor]` で返す**
-   - メリット: T-M2.5 で中間 y_t も loss 対象にする場合に必要
-   - 却下 (本チケット v1): T-M2.5 設計確定前に option を増やすと API が散らかる。T-M2.5 から要請があれば `return_intermediates: bool = False` を追加。**M2.5 実装時に再評価**
+   - メリット: T-M2.5 で中間 y_t も loss 対象にする場合に必要 (論文 §3.2 / Fig 1a の WaveFit ベース fixed-point iteration の核心)
+   - **採用昇格 (重要)**: 本チケット v1 で `return_intermediates: bool = False` を採用 (上記「採用設計」参照)。T-M2.5 で必要になってから戻すのは API migration cost で遅い
 
 8. **`forward(mel, x_gt: torch.Tensor)` で `audio_length` の代わりに `x_gt` を渡す**
    - メリット: `torch.zeros_like(x_gt)` で直接初期化、dtype/device も `x_gt` から取得
@@ -508,19 +589,29 @@ class GANWaveNext2(nn.Module):
 |---|---|---|
 | `_residual_update` のパターン (A)/(B) pin | M5 smoke 後 | smoke が通らない場合に逆パターンを試す |
 | `T=4` default | M6.3 ablation | T=2,3,5 と品質 / RTF 比較後 |
-| `audio_length: int` 必須 | M2.5 実装時 | `forward(mel)` のみで動くなら省略可能化 |
-| 中間 y_t を返す option | M2.5 実装時 | loss に中間を使う設計が確定したら追加 |
-| `nn.ModuleList` 構造 | M3 完了後 | DiffWaveNext2 と共通親クラスを抽出する設計が出たら検討 |
-| `checkpoint_sequential` segment 化 | M5 / M6 OOM 発生時 | 24GB GPU で OOM なら追加 |
+| `audio_length=None` auto-infer 式 | T-M1.3 確定後 | `T_mel * hop` か `(T_mel-1) * hop` か center=True 整合性で確定 |
+| 中間 y_t loss 設計 (stop_gradient 配置) | T-M2.5 実装時 | 本チケットは intermediates list を返すのみ、loss / stop_gradient は T-M2.5 |
+| `nn.ModuleList` 構造 | T-M3.1 着手前 | DiffWaveNext2 と共通親クラス `BaseVocoder` / `IterativeVocoder` を抽出するか評価 (§8.2 参照) |
+| `checkpoint(..., use_reentrant=False)` 挟み込み | M5 / M6 OOM 発生時 | 24GB GPU で OOM なら enable_grad_ckpt=True 経路で発動 |
 | `from_config` factory 追加 | T-M1.6 完了時 | factory が確立してたら本チケットも一貫化 |
+| `_residual_update` を Callable 引数化 | 本チケット実装時 | T-M1.6 戻り値仕様がまだ未確定なら採用 (CI grey 回避) |
 
 ### 8.2 思想 / 哲学の見直し
 - **このサブタスクの粒度は適切か**: 適切。
   - GAN-WaveNeXt 2 の本質は「T 個の sub-model を直列に並べた fixed-point iteration」であり、これを 1 ファイル / 1 クラスに閉じ込めることで T-M2.5 (train) / T-M4.3 (RTF) が「`GANWaveNext2(T=4)` を instantiate するだけ」で済む
-  - 中間 y_t の loss 設計 (T-M2.5) と分離することで、本チケットは pure な forward 実装に集中
+  - 中間 y_t の **loss 設計** (stop_gradient 挿入箇所等) は T-M2.5 に委譲し、本チケットは forward に intermediates list を返す option を持つだけに留める
 - **別マイルストーンに移すべき部分はないか**: なし。M2 (GAN) の中核として正しい位置
+- **M3 (Diff) との抽象化レベル不整合リスク (新規追加 / Critical 評価項目)**:
+  - T-M3.1 (DiffWaveNext2) は **4 sub-model を band 独立で呼び出す** (point-specialized partition)、本チケットの GAN は **T sub-model を逐次更新** (fixed-point iteration)
+  - 両者の forward signature が divergent な可能性:
+    - GAN: `forward(mel, audio_length=None, return_intermediates=False) -> Tensor | list[Tensor]`
+    - Diff: `forward(mel, noise_level=None, ...) -> Tensor` (推定)
+  - **T-M3.1 着手前に共通親クラス `BaseVocoder(nn.Module)` または `IterativeVocoder(BaseVocoder)` を抽出するか評価**:
+    - 案 1: `BaseVocoder.forward(mel, **kwargs) -> Tensor` を pin、両者で **kwargs** で柔軟に対応
+    - 案 2: 抽象化が無理なら明示的に「2 つの並列実装」と決め、共通化を諦める (T-M3.1 ticket §8 で記録)
+  - **本チケット v1 では single-class 設計を維持**、T-M3.1 着手時 (= M3 phase 開始時) に再評価
 - **インターフェース定義の見直し余地**:
-  - **`forward(mel, audio_length)` の引数順序**: T-M1.6 SubModelGAN が `forward(mel, y_prev)` で mel が先頭 → 整合
+  - **`forward(mel, audio_length, return_intermediates)` の引数順序**: T-M1.6 SubModelGAN が `forward(mel, y_prev)` で mel が先頭 → 整合
   - **`audio_length: int` を `audio_shape: tuple[int, ...]` (= `(B, T_audio)`) に変更**: 多 channel 対応が将来出たときの拡張性向上。**M1 phase review 風の検討**: 現状 mono のみ前提なので `int` で十分、stereo / multichannel は M7 で再考
   - **`from_config(cls, cfg: dict)` factory 追加**: T-M1.6 §8.2 (factory パターン全モジュール一貫化) と整合させるため、本チケットでも factory を追加することを **推奨**
 
@@ -536,6 +627,8 @@ class GANWaveNext2(nn.Module):
 #### T-M1.6 (SubModelGAN) へ (双方向同期)
 - **戻り値仕様 (n_t vs y_{t-1})** を本チケット実装時に確定したら、T-M1.6 SubModelGAN docstring の対応箇所を **同時に update**。両方の docstring が同じパターン (A) または (B) を pin していることを確認
 - もし T-M1.6 が未確定のまま本チケットを着手するなら、**先に T-M1.6 §6.1 critical を解決** (T-M1.6 → T-M2.4 → T-M2.5 の順序を厳守)
+- **T-M1.6 戻り値仕様**: 本チケット実装時に確定、**両チケットを同時 update** (片方だけ update すると不整合)
+- **パターン (A) 採用時のサブモデル clip 仕様**: §6.1 critical 「T=1 degenerate test の clip 範囲問題」参照。sub-model 側 clip(-1,1) を外すか、本チケットの `_residual_update` 後に clip を入れる設計を pin (T-M1.6 docstring にも反映)
 
 #### T-M2.5 (train_gan) へ
 - **使用方法**:
@@ -544,19 +637,24 @@ class GANWaveNext2(nn.Module):
 
   # YAML config から
   model = GANWaveNext2(T=cfg.T, sub_model_cfg=cfg.sub_model, enable_grad_ckpt=cfg.grad_ckpt)
-  # 訓練 step
-  y_0 = model(mel, audio_length=x_gt.shape[1])
-  loss_G = mr_stft(y_0, x_gt) + λ_adv * adv(D, y_0) + λ_fm * fm(D, y_0, x_gt)
+  # 訓練 step (中間 y_t も loss 対象にする場合)
+  intermediates = model(mel, return_intermediates=True)  # [y_T, y_{T-1}, ..., y_0]
+  y_0 = intermediates[-1]
+  loss_G = sum(mr_stft(y_t, x_gt) for y_t in intermediates[1:])  # 中間 + 最終
+  loss_G += λ_adv * adv(D, y_0) + λ_fm * fm(D, y_0, x_gt)
+  # または y_0 のみで簡易訓練
+  y_0 = model(mel)  # audio_length=None で auto-infer
   ```
 - **重要事項**:
   - **`T=4`** が論文推奨。ablation で T=2,3,5 を試す場合は YAML config の `T` を変更
   - **`enable_grad_ckpt`**: A100 40GB なら `False`、24GB GPU では `True` 推奨
-  - **forward は y_0 のみ返す** (現状)。中間 y_t を loss 対象にする設計を採用する場合は **本チケットに forward option (`return_intermediates: bool`) を追加要請**
-  - **`fixed-point loss 設計`**: `docs/training.md` §2.1 では y_0 のみが loss 対象 (中間 y_t は使わない、stop_gradient 不要)。中間 y_t を使う場合は適切な stop_gradient を T-M2.5 で挿入 (本チケットの forward は中間に stop_gradient を入れていない)
+  - **`return_intermediates=True` で中間 y_t も loss 対象にする** (fixed-point iteration 本論文の中核): 論文 §3.2 / Fig 1a の WaveFit ベース設計では中間 y_t に loss をかけないと sub-model 間の役割分担が崩れる。**T-M2.5 では default で `return_intermediates=True` を使い、中間 y_t を loss 対象に含める**
+  - **`audio_length=None` で auto-infer を default にする**: T-M2.5 では明示的な `audio_length` を渡さず `model(mel)` で呼ぶことを推奨 (shape mismatch リスク減)。`x_gt.shape[-1]` を渡す場合は **T-M1.3 で `T_audio = T_mel * hop` か `(T_mel-1) * hop` が確定したら本チケットも揃える** (§6.1 通常項目)
+  - **`best.pt` atomic rename pattern**: val improvement 頻発期 (M5.1 1 epoch では起きやすい) の race condition 回避のため、`torch.save(state, "best.pt.tmp")` → `os.replace("best.pt.tmp", "best.pt")` のアトミック書き込みを採用 (§6.1 critical 寄り参照)。DDP では rank0 のみが書き込む `if rank == 0:` ガード必須。**`keep_last_n` checkpoint 削除** (200 ckpt から 5 残し) も同様の race 注意
+  - **`fixed-point loss 設計`**: `docs/training.md` §2.1 では y_0 のみが loss 対象だが、中間 y_t を使う設計が WaveFit-original 流。stop_gradient 挿入箇所は **T-M2.5 で設計** (本チケットの forward は中間に stop_gradient を入れていない、生の autograd 連鎖を返す)
   - **初期化**: `model` 内部で `torch.zeros(B, audio_length)` を生成、T-M2.5 側で zeros を作る必要なし
-  - **`audio_length` 引数**: `x_gt.shape[1]` を渡す。**T-M1.3 で `T_audio = T_mel * hop` か `(T_mel-1) * hop` が確定したら本チケットも揃える** (§6.1 通常項目)
-  - **Discriminator (T-M2.2)** と組み合わせ: `y_0 = model(mel, audio_length); D_out = D(y_0)` で hinge loss を計算
-  - **MR-STFT loss (T-M2.3)** と組み合わせ: `mr_stft(y_0, x_gt)` で 3 resolution × (SC + Mag) を計算
+  - **Discriminator (T-M2.2)** と組み合わせ: `y_0 = intermediates[-1]; D_out = D(y_0)` で hinge loss を計算 (Discriminator は最終 y_0 のみに適用、中間 y_t は MR-STFT loss のみ)
+  - **MR-STFT loss (T-M2.3)** と組み合わせ: 中間 y_t 全てに対し `mr_stft(y_t, x_gt)` を計算 (T 個合算)
 
 #### T-M4.3 (RTF measurement) へ
 - **使用方法**:
@@ -581,6 +679,20 @@ class GANWaveNext2(nn.Module):
   - 1 utterance × 1000 step で `MR-STFT loss < 初期値の 10%` を期待
   - 失敗時の first action: `enable_grad_ckpt=True` で再試行 / `T=1` に減らして sub-model 単体の品質確認
 
+#### T-M3.1 (Diff モデル) へ (新規追加)
+- **`BaseVocoder` / `IterativeVocoder` 抽出判断を M3.1 着手時に行う** (§8.2 参照):
+  - Diff は band 独立呼び出しなので forward signature が異なる:
+    - GAN: `forward(mel, audio_length=None, return_intermediates=False) -> Tensor | list[Tensor]`
+    - Diff: `forward(mel, noise_level, ...) -> Tensor` (推定、point-specialized partition で 4 sub-model を band 独立に呼ぶ)
+  - 共通親クラス案:
+    - 案 1: `BaseVocoder(nn.Module).forward(mel, **kwargs) -> Tensor` を pin、両者で **kwargs** で柔軟に対応
+    - 案 2: `IterativeVocoder(BaseVocoder)` で iteration ロジック (`forward` の for ループ部分) を共通化、`_step(t, y, mel) -> y_new` 抽象 method を sub-model 毎に override
+  - **共通化が無理なら明示的に「2 つの並列実装」設計と決め、T-M3.1 §8 で記録**
+  - T-M3.1 着手前に決めないと両者が divergent な API になり、T-M4.x (RTF, MCD 等) で重複コードが発生する
+- **GAN との API 不整合リスク**:
+  - GAN は `return_intermediates: bool` を持つが Diff は band 独立呼び出しで「中間 y_t」概念が異なる (Diff は reverse process で各 step が異なる schedule index に対応)
+  - 抽象化レベル不整合の典型例、M3.1 着手時に明示的に評価
+
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:
   - [ ] `docs/milestones.md` §M2.4 の Acceptance チェックボックス 3 項目をすべてチェック
@@ -590,12 +702,14 @@ class GANWaveNext2(nn.Module):
 
 ### 9.3 Open question として残ったもの
 - **解決できなかった疑問**:
-  - **中間 y_t を loss 対象にすべきか** (T-M2.5 で決定): `docs/training.md` §2.1 では y_0 のみだが、stop_gradient を入れた中間 loss の方が訓練安定の文献あり (要 M2.5 で判断)
+  - **中間 y_t loss の stop_gradient 配置** (T-M2.5 で決定): 本チケット v1 で `return_intermediates: bool` の option は提供するが、stop_gradient 挿入箇所は T-M2.5 の loss 設計時に確定。`docs/training.md` §2.1 の y_0 のみ式から拡張する場合の数式表現も T-M2.5 で明文化
+  - **`BaseVocoder` / `IterativeVocoder` 抽出可否** (T-M3.1 着手前に決定): GAN / Diff の抽象化レベル不整合リスク、共通化無理なら 2 並列実装で確定
 - **将来検討事項** (§8.1 再評価トリガー表参照):
   - `T=4` default の妥当性 (M6.3 ablation で T=2,3,5 と比較)
   - `from_config` factory 追加 (T-M1.6 と一貫化)
-  - `forward(mel)` のみで `audio_length` 省略可能化 (T-M1.3 確定後)
-  - `checkpoint_sequential` segment 化 (M5/M6 OOM 時)
-  - `return_intermediates` option (T-M2.5 要請時)
-  - DiffWaveNext2 (T-M3.1) と共通親クラス抽出 (M3 完了後)
+  - `audio_length=None` の auto-infer 式 (T-M1.3 center=True 整合性確定後)
+  - `checkpoint(..., use_reentrant=False)` T 毎挟み込み (M5/M6 OOM 時に発動)
+  - `_residual_update` を Callable 引数化 (T-M1.6 戻り値仕様が本チケット着手時に未確定なら採用)
+  - DiffWaveNext2 (T-M3.1) と共通親クラス `BaseVocoder` / `IterativeVocoder` 抽出 (T-M3.1 着手前に判断)
+  - パターン (A) 採用時の clip 配置設計 (sub-model 側 or 本チケット側 or 両方)
 - **`docs/open-questions.md` への追記要否**: 不要 (戻り値仕様は T-M1.6 / 本チケット内で解決、`docs/open-questions.md` は論文事実確認の場であり実装判断は ticket 内で解決)

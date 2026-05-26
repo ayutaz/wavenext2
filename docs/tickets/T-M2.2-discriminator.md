@@ -394,11 +394,11 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
 - [ ] `test_nlayer_groups`: Layer 1〜4 の groups が `nf_prev // 4` (16//4=4, 64//4=16, 256//4=64, 1024//4=256)
 
 #### weight_norm 適用確認
-- [ ] `test_weight_norm_applied`: 全 `nn.Conv1d` が `weight_norm` でラップされている (`hasattr(conv, "weight_v")` または `parametrizations.weight` の存在で判定)
+- [ ] `test_weight_norm_applied`: 全 `nn.Conv1d` が `weight_norm` でラップされている。**API 非依存判定** として `torch.nn.utils.parametrize.is_parametrized(conv, "weight")` を使用 (旧 API `hasattr(conv, "weight_v")` と新 API `parametrizations.weight` の両対応で CI flakiness を回避)
 - [ ] `test_no_spectral_norm`: `spectral_norm` が **適用されていない** (parametrizations に `spectral_norm` 名が無い)
 
 #### パラメータ数 sanity check
-- [ ] `test_param_count_sanity`: 全体 `sum(p.numel() for p in model.parameters())` が **桁レベルで妥当** (e.g., 30M〜80M の range、order check)。WaveFit-PT 設定で実測値を pin (1 回計算してテストに hardcode、±2% 許容)
+- [ ] `test_param_count_sanity`: 全体 `sum(p.numel() for p in model.parameters())` が **桁レベルで妥当** (e.g., 30M〜80M の range、order check)。WaveFit-PT 設定で実測値を pin (1 回計算してテストに hardcode、±2% 許容)。**PyTorch version 依存性に注意**: hardcode 値は PyTorch のレイヤ実装変更で揺れる可能性があり、本チケットでは `torch >= 2.10` pin (`pyproject.toml`) で対処、実測した pin 値 (合計 ~50M order) は実装着手後に固定
 - [ ] `test_per_sub_d_param_count_equal`: 3 sub-D のパラメータ数が完全一致 (`set(sub_d_params) == 1` を確認)
 
 #### gradient flow / 学習互換性
@@ -436,8 +436,9 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
 
 ### 5.5 テスト戦略 (M2 phase で確立)
 
-- **CI 時間目標**: CPU で全テスト合計 **< 20 秒**。各 sub-D は ~17M params だが forward は B=2 / T=16384 で軽量
+- **CI 時間目標**: CPU で全テスト合計 **< 20 秒** (M2 全体 60s 目標から)。各 sub-D は ~17M params だが forward は B=2 / T=16384 で軽量
   - **必須最適化**: `scope="module"` fixture で `MultiScaleDiscriminator` インスタンスを再利用 (各テストで `init` し直さない)
+- **API 非依存 weight_norm テスト**: `torch.nn.utils.parametrize.is_parametrized(conv, "weight")` を使用 (旧 API `weight_v` / 新 API `parametrizations.weight` の両方を意識せず判定可能、CI flakiness の温床を回避)
 - **GPU テスト分離**: `@pytest.mark.gpu` マーカーで GPU テストを CI runner 別に分離。CPU only CI では `pytest -m "not gpu"` で除外
 - **`@pytest.mark.slow` マーカー**: `test_real_audio` 等 LibriTTS-R 実音声を使うテストは `slow` でデフォルト除外
 - **coverage 目標**: 本チケットのカバレッジ目標 **90%** (forward / `_init`、`from_config` の全分岐をカバー)
@@ -486,6 +487,17 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
 #### B=1 動作
 - **問題**: WaveFit-PT は B>=2 で実装されている可能性、B=1 で groups conv の挙動を確認
 - **対応**: `test_batch_size_one` で明示的に検証
+
+#### D 強すぎ問題と D capacity の関係
+- **問題**: hinge GAN で D が強すぎると G が学習しない (D が 0 loss に張り付き G の更新シグナルが消える)。これは D update 頻度調整 (T-M2.5 §8.1) と並んで **D capacity の選択** とも表裏一体の関係にある
+- **対応**: 本チケットは default `num_D=3, ndf=16` (WaveFit-PT 準拠) で実装するが、M2.6 / M5.1 smoke で D dominate (`loss_D < 0.01`, `loss_G_adv` 発散 / 停滞) が観測されたら、capacity ablation として `num_D=2` または `ndf=8` を試す余地を残す。`MultiScaleDiscriminator(num_D=2)` で動作することを `from_config` の余分 key 無視と並ぶ柔軟性として担保
+- **再評価トリガー**: M5.1 で hinge GAN D が dominate (`loss_D` が極小、`loss_G_adv` が学習しない) → `num_D=2` ablation を実施
+- **検知**: M2.6 smoke で `loss_D` / `loss_G_adv` の比率を観測
+
+#### `param_count_sanity` の hardcode 値の PyTorch version 依存
+- **問題**: WaveFit-PT 設定で pin した param count 値は、PyTorch のレイヤ実装変更 (例: `weight_norm` parametrization 内部構造の変更) で揺れうる
+- **対応**: `pyproject.toml` で `torch >= 2.10` pin することで version flakiness を抑える。WaveFit-PT で実測した pin 値 (合計 ~50M order) は **実装着手後に固定** し、テストで ±2% 許容で照合。PyTorch メジャー version 更新時はテスト失敗で気付ける形を維持
+- **検知**: CI で `test_param_count_sanity` 失敗時に、PyTorch version 差分を確認 (`uv pip list | grep torch`)
 
 ### 6.2 仕様の曖昧さ
 
@@ -553,11 +565,26 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
     - (b) HiFi-GAN 系の MPD ×5 を追加すると **論文と異なる結果** になり、再現実装の意義 (論文の主張を検証する) が損なわれる
     - (c) BigVGAN 等の最近の vocoder では MR-STFT discriminator が使われるが、WaveFit / WaveNeXt 2 は MSD のみで品質を達成しており、本チケットでは **論文準拠を優先**
 
-- **中間特徴を forward 戻り値の tuple に含める (案 A)**
+- **`DiscriminatorOutput(logits, features)` NamedTuple 導入 (M2 phase review で採用昇格)**
+  - 理由: T-M2.3 §6.1 critical の `num_features=18 vs 21` 問題 (FM loss で features の個数を取り違える / logits を features 側に含めるかどうか曖昧) の **根本原因が戻り値仕様の不明瞭さ**。`list[tuple[Tensor, list[Tensor]]]` で素の tuple を返すと「features に logits を含めるべきか」が呼び出し側に委ねられて bug の温床になる
+  - 仕様: `DiscriminatorOutput` は `typing.NamedTuple` で `logits: torch.Tensor` と `features: list[torch.Tensor]` を持つ。**`features` に logits は含めない** (中間特徴 6 個のみ、3 sub-D × 6 layer = 18 個の features を T-M2.3 で L1 比較する)
+  - `MultiScaleDiscriminator.forward(x) -> list[DiscriminatorOutput]` (length=3)
+  - 後方互換: `DiscriminatorOutput` は NamedTuple なので `(logits, features)` の tuple unpacking がそのまま動く、既存コード `for logits, features in D(x):` は無修正
+  - 副次効果: docstring / type hint が読みやすくなり、T-M2.3 のテストで `output.features` で属性アクセス可能
+  - **却下していた根拠 (素の tuple)** : 当初は「Python 標準 tuple で軽量化を優先」だったが、`num_features` 誤認の bug リスクが軽量化メリットを上回ると M2 phase review で判明
+
+- **`unsqueeze(1)` 責務を D 側で defensive に受け入れる**
+  - 理由: Generator 出力 `(B, T)` を `(B, 1, T)` に unsqueeze する責務を呼び出し側 (T-M2.5) に投げると、忘れた瞬間 `nn.Conv1d` の cryptic な shape error (`RuntimeError: Expected 3D ... input ...`) しか出ず、デバッグが困難
+  - 仕様: `MultiScaleDiscriminator.forward` 冒頭で `if x.dim() == 2: x = x.unsqueeze(1)` を入れて、`(B, T)` と `(B, 1, T)` の両方を defensive に受け入れる。stereo (`(B, 2, T)`) は引き続き `Conv1d in_channels=1` mismatch エラーに任せる
+  - 副次効果: T-M2.5 で `D(audio.unsqueeze(1))` が不要、`D(audio)` で OK (`audio.shape == (B, T)` でも `(B, 1, T)` でも)
+  - **却下していた根拠** : 当初は「shape チェックを strict にしない、呼び出し側責務」だったが、`(B, T)` を受け取ったときの cryptic error が後続 (T-M2.5 / T-M2.6 smoke) のデバッグ時間を増やすと判断
+
+- **中間特徴を forward 戻り値の NamedTuple に含める (案 A、NamedTuple 化で更に明確化)**
   - 理由: 1 forward で済む、コミュニティ標準、テスト容易性
 
 - **`weight_norm` 新 API (parametrizations) 採用**
   - 理由: torch 2.10+ で旧 API は deprecated、warning なしで動作
+  - **テスト判定は API 非依存**: `torch.nn.utils.parametrize.is_parametrized(conv, "weight")` を使用 (旧 API `hasattr(conv, "weight_v")` と新 API `parametrizations.weight` の両対応で CI flakiness の温床を回避)
 
 #### Deprecated (代替案、却下根拠)
 
@@ -616,6 +643,12 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
     - メリット: HiFi-GAN で実績
     - 却下: WaveFit-PT 準拠で 0.2
 
+13. **D capacity ablation (`num_D=2`)**:
+    - メリット: hinge GAN の D 強すぎ問題への対処。Discriminator capacity 選択と D 強度バランスは **表裏一体** であり、D update 頻度調整 (T-M2.5 §8.1) と並んで D capacity を ablation する余地
+    - 採用: **再評価候補** として明示残し。default は WaveFit-PT 準拠 `num_D=3`、`MultiScaleDiscriminator(num_D=2)` で動作するよう `from_config` の引数化は維持
+    - 再評価トリガー: **M5.1 で hinge GAN D が dominate** (`loss_D < 0.01` 張り付き、`loss_G_adv` 学習しない) → `num_D=2` ablation を実施
+    - 関連: §6.1 「D 強すぎ問題と D capacity の関係」、T-M2.5 §8.1 D update 頻度調整
+
 #### 再評価トリガー条件
 
 | 設計判断 | 再評価タイミング | 想定変更 |
@@ -624,8 +657,9 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
 | `weight_norm` | M2.6 smoke | 訓練 divergence なら `spectral_norm` |
 | LeakyReLU(0.2) | M2.6 smoke | dead ReLU 多発なら 0.1 / GELU 試行 |
 | AvgPool1d downsample | M6.3 ablation | 学習可能 downsample (`Conv1d stride=2`) 試行 |
-| 中間特徴 forward 戻り値 | M5 phase review | API 改善余地あれば separate method 化 |
+| 中間特徴 forward 戻り値 | (済) M2 phase review | `DiscriminatorOutput` NamedTuple 採用昇格 |
 | `weight_norm` 新 API | M5 warm-start | 旧 API state_dict との互換性が必要なら旧 API も追加サポート |
+| D capacity (`num_D=3`) | M5.1 smoke | D dominate (`loss_D` 極小) なら `num_D=2` ablation |
 
 ### 8.2 思想 / 哲学の見直し
 
@@ -635,8 +669,22 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
 - **別マイルストーンに移すべき部分はないか**: なし。M2 (GAN-WaveNeXt 2) の Loss と Training の前提として、M2 内に位置するのが自然。
 - **インターフェース定義の見直し余地**:
   - **`MultiScaleDiscriminator.NUM_D` クラス属性**: T-M2.3 / T-M2.5 / FM loss の重み計算で `D.NUM_D` を参照可能。docstring だけだと変更検知が弱い
-  - **`forward` 戻り値の typing**: `list[tuple[torch.Tensor, list[torch.Tensor]]]` は読みづらい。M5 で TypedDict / dataclass 化を検討
+  - **`forward` 戻り値の typing**: (済) M2 phase review で `DiscriminatorOutput(logits, features)` NamedTuple を採用昇格。`num_features=18 vs 21` 取り違え問題の予防
   - **`from_config(cfg)` factory**: M1 横断テーマ (T-M1.2 / T-M1.3 / T-M1.4 / T-M1.5 / T-M1.6 と同じ) と一貫化
+
+#### `unsqueeze(1)` 責務の defensive design (M2 phase review で追記)
+
+- **問題**: Generator 出力 `y_0.shape == (B, T)` を `(B, 1, T)` に unsqueeze する責務が現状 **呼び出し側 (T-M2.5)** に投げられている。`y_0.unsqueeze(1)` を忘れた瞬間、`nn.Conv1d` の cryptic な shape error (`RuntimeError: Expected 3D ... input ...`) しか出ず、原因特定に時間を取られる
+- **採用方針**: D 側で受け入れる方が **defensive** であり、本チケットで採用する:
+  ```python
+  def forward(self, x: torch.Tensor) -> list[DiscriminatorOutput]:
+      if x.dim() == 2:
+          x = x.unsqueeze(1)   # (B, T) → (B, 1, T), defensive
+      # ... 以降は (B, 1, T) を前提に処理
+  ```
+- **理由**: silent failure を避け、間違えた呼び出し方でも reasonable な動作をする (API contract 緩和、cryptic error の予防)。stereo (`(B, 2, T)`) は引き続き `Conv1d in_channels=1` mismatch error に任せて明示的に失敗させる
+- **副次効果**: T-M2.5 で `D(audio.unsqueeze(1))` 不要、`D(audio)` で OK。M2.6 smoke で `unsqueeze` 忘れ bug の余地を消す
+- **テスト**: `test_msd_accepts_2d_input` で `(B, T)` 入力でも `(B, 1, T)` と同じ出力になることを確認
 
 #### M2 phase で検討する追加設計原則
 
@@ -644,10 +692,11 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
   - 採用根拠: `NLayerDiscriminator` は MSD 専用の internal helper で、外部から直接生成する必要なし。export しないことで API surface を最小化
   - `__init__.py` の `__all__` には `MultiScaleDiscriminator` のみ
 
-- **`forward` 戻り値の **dataclass / NamedTuple 化** の保留**:
-  - 現状: `list[tuple[Tensor, list[Tensor]]]` で素直に返す
-  - 案: `DiscriminatorOutput(logits=..., features=...)` の NamedTuple を導入
-  - 採否: **保留**。M2 で T-M2.3 (Loss) 実装時に「読みづらい」と判明したら採用。本チケットでは Python 標準 tuple で軽量化を優先
+- **`forward` 戻り値の dataclass / NamedTuple 化 (M2 phase review で採用昇格)**:
+  - **採用**: `DiscriminatorOutput(logits: Tensor, features: list[Tensor])` の `typing.NamedTuple` を導入
+  - **採用根拠**: T-M2.3 §6.1 critical の `num_features=18 vs 21` 問題 (FM loss で features に logits を含めるか否かが曖昧、3 sub-D × {6 or 7} layer = {18 or 21} の取り違え) の **根本原因が戻り値仕様の不明瞭さ**。型レベルで `logits` と `features` を分離し、`features` には logits を **含めない** 方針を明示
+  - **後方互換**: NamedTuple なので `(logits, features)` の tuple unpacking がそのまま動く (既存 docstring のサンプルコード無修正)
+  - **保留していた根拠の見直し** : 当初は「軽量化を優先」だったが、`num_features` の取り違え bug リスクが軽量化メリットを上回ると M2 phase review で判明
 
 - **`MultiScaleDiscriminator(num_D=3)` の default を 3 に固定**:
   - 採用根拠: WaveFit-PT 準拠を default で守る。`num_D=5` 等を渡すと M6.3 ablation 用途として動作するが、default では論文準拠
@@ -665,6 +714,16 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
 #### T-M2.3 (Loss 関数) へ
 
 **最重要**: 本チケットの `MultiScaleDiscriminator.forward` の戻り値仕様を **T-M2.3 で hinge GAN loss と FM loss の入力として直接使う**。
+
+##### `DiscriminatorOutput` NamedTuple 仕様 (M2 phase review で確定)
+
+T-M2.3 §6.1 critical の `num_features=18 vs 21` 取り違え問題を予防するため、本チケットで以下を確定:
+
+- **`DiscriminatorOutput(logits: Tensor, features: list[Tensor])` を `typing.NamedTuple` として定義**
+- **`features` に logits は含めない** (中間特徴 6 個のみ、各 sub-D)
+- FM loss は **3 sub-D × 6 layer = 18 個** の features を L1 比較 (21 ではない)
+- `MultiScaleDiscriminator.forward(x) -> list[DiscriminatorOutput]` (length=3、`NUM_D=3`)
+- 後方互換: NamedTuple は tuple unpacking 互換、既存サンプルコード `for logits, features in D(x):` は無修正で動作
 
 ##### 使用方法
 ```python
@@ -733,9 +792,11 @@ def feature_matching_loss(D, y_real, y_fake):
   ```python
   opt_D = torch.optim.AdamW(D.parameters(), lr=2e-4, betas=(0.8, 0.99), weight_decay=1e-3)
   ```
-- **shape 注意**:
-  - Generator 出力 `y_0.shape == (B, T_audio)` を `y_0.unsqueeze(1)` で `(B, 1, T_audio)` に変換してから D に渡す
-  - GT 波形 `x_gt.shape == (B, T_audio)` も同様に `unsqueeze(1)` する
+- **shape 注意 (M2 phase review で defensive 化)**:
+  - **`unsqueeze(1)` は D 側で defensive に受け入れる**: Generator 出力 `y_0.shape == (B, T_audio)` のままで `D(y_0)` 呼び出し可能 (D 側で `if x.dim() == 2: x = x.unsqueeze(1)` を実行)
+  - `(B, 1, T)` で渡しても同じ結果 (NumPy / PyTorch 慣例の両方を許容)
+  - 呼び出し側 (T-M2.5) で明示的に `unsqueeze(1)` は **不要**、忘れても D 側で吸収するため cryptic な `Conv1d` shape error を予防
+  - stereo (`(B, 2, T)`) は引き続き `Conv1d in_channels=1` mismatch error で明示的に失敗
   - segment_length = 16,384 (Vocos 流) で T=16384 / 2^3 = 2048 が最小 (3 sub-D 後の最終 T_k)
 - **D.train() / D.eval()**: 切替の副作用なし (BatchNorm / Dropout 不含)、`opt_D.step()` 前後で気にしなくて良い
 
@@ -755,13 +816,14 @@ discriminator:
 ```
 
 #### 注意事項 (後続が踏みそうな罠)
-1. **入力 shape は `(B, 1, T)`**: `(B, T)` (channel dim 欠落) を渡すと `nn.Conv1d` のエラー、`(B, 2, T)` (stereo) を渡すと `in_channels=1` mismatch エラー
-2. **中間特徴 list の長さは 6** (7 layers - 1 logits 層)、FM loss は 3 sub-D × 6 layer = **18 個** の特徴を比較
+1. **入力 shape は `(B, 1, T)` または `(B, T)`** (M2 phase review で defensive 化): `(B, T)` でも D 側で `unsqueeze(1)` を自動付与、stereo `(B, 2, T)` のみ `in_channels=1` mismatch エラー
+2. **中間特徴 list の長さは 6** (7 layers - 1 logits 層)、FM loss は 3 sub-D × 6 layer = **18 個** の特徴を比較。`DiscriminatorOutput` NamedTuple の `features` には **logits を含めない** (`num_features=21` は誤り)
 3. **最終 logits は activation なし**: 上位で `sigmoid` / `tanh` を**適用しない** (hinge GAN は raw logits を期待)
-4. **`weight_norm` 新 API**: state_dict key 形式が旧 API と異なる。WaveFit-PT 重みを warm-start する場合は別途マッピング層が必要
+4. **`weight_norm` 新 API**: state_dict key 形式が旧 API と異なる。WaveFit-PT 重みを warm-start する場合は別途マッピング層が必要。テストは API 非依存に `torch.nn.utils.parametrize.is_parametrized(conv, "weight")` で判定
 5. **`y_fake.detach()` 忘れ**: D 側更新時に detach しないと Generator にも勾配が流れる
 6. **`AvgPool1d padding`**: padding=1 で T が半減ずつになる。padding=0 だと 1 ずれて FM loss の shape mismatch リスク
 7. **`B=1` 動作**: テスト済 (`test_batch_size_one`)、`groups` conv も問題なし
+8. **`DiscriminatorOutput` NamedTuple**: tuple unpacking 互換だが、属性アクセス (`output.logits`, `output.features`) も可能。可読性を優先する場合は属性アクセス推奨
 
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:

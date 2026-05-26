@@ -7,7 +7,7 @@ status: pending
 size: M
 owner: -
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-26  # M2 phase review 反映
 depends_on: [T-M0.3, T-M1.3]
 blocks: [T-M2.5, T-M3.2]
 related_docs:
@@ -43,18 +43,24 @@ T-M0.3 で生成した LibriTTS-R filelist (TSV header 付き) を読み込み�
 - **mel 抽出は on-the-fly** が M1 デフォルト (precompute は §8.1 案で M5 phase review 再評価)
 - **`mel` と `STFT-spec` の dynamic range mismatch 懸念** (T-M1.2 / T-M1.6 §6.1 から伝搬) は本チケット tests で grad norm を観測する
 - **Windows での sox_effects 動作** (T-M0.1 §6 整合): torchaudio backend に sox_io が含まれることを前提
+- **`__getitem__` 戻り値は `Batch` TypedDict** (M2 phase review 採用昇格): `{"mel": Tensor, "audio": Tensor, "n_samples": int}` で M3 `noise_level` / M4 `speaker_id` 追加に前方互換
+- **`return_mel: bool = True` 引数を予約** (M2 phase review 検討追加): M5 で CPU 律速判明時の MelOnGPU 第 3 の選択肢、実装は M5 で行う (本チケットでは引数だけ追加、`False` は `NotImplementedError`)
+- **`seed_worker` テンプレ snippet を本チケット §9.1 で提供** (M2 phase review 責務移譲完結): T-M2.5 / T-M3.2 は import するだけ
 
 ### ゴール
 - [ ] `src/wavenext2/data/dataset.py` に `LibriTTSRDataset(Dataset)` が実装される
-- [ ] `__init__(filelist_path, root_dir, segment_length, hop_length, mel_cfg, mode)` のシグネチャで GAN/Diff 両 config から生成可能
+- [ ] `__init__(filelist_path, root_dir, segment_length, hop_length, mel_cfg, mode, seed, return_mel=True)` のシグネチャで GAN/Diff 両 config から生成可能
+- [ ] `__getitem__` 戻り値は **`Batch` TypedDict** (`{"mel", "audio", "n_samples"}`) — M2 phase review 採用昇格
 - [ ] mode="train" で sox norm gain が **U(-6, -1) dB** から sample される (`np.random.uniform(-6, -1)`)
 - [ ] mode="val" で sox norm gain が **-3 dB** の固定値
 - [ ] 短い wav は **反射 pad** で `segment_length` まで拡張、長い wav は **random crop**
 - [ ] mel と audio の時間長整合: `audio.shape[0] == mel.shape[1] * hop_length` (center=True の `T_mel = floor(T_audio/hop)+1` 規約は T-M1.3 で pin 済み)
 - [ ] `LogMelSpectrogram.from_config(mel_cfg)` (T-M1.3) を Dataset 内で利用
-- [ ] `tests/test_dataset.py` 新規作成、Acceptance 全項目を pytest で網羅 (`uv run pytest tests/test_dataset.py` が pass)
-- [ ] `from wavenext2.data.dataset import LibriTTSRDataset` が import 可能
+- [ ] `tests/test_dataset.py` 新規作成、Acceptance 全項目を pytest で網羅 (`uv run pytest tests/test_dataset.py` が pass、**15 秒以内**)
+- [ ] `from wavenext2.data.dataset import LibriTTSRDataset, Batch, seed_worker` が import 可能
+- [ ] **`seed_worker(worker_id)` 関数** がモジュール末尾に配置され、T-M2.5 / T-M3.2 が import 可能 — M2 phase review 責務移譲完結
 - [ ] BucketSampler 実装の補助クラスとして `n_samples` 列を Dataset attribute 経由で公開
+- [ ] `return_mel: bool = True` 引数が `__init__` に追加され、`False` の場合は `NotImplementedError` (M5 で MelOnGPU 実装予約)
 - [ ] `docs/milestones.md` §M2.1 Acceptance 4 項目をすべてクリア
 
 ## 2. 実装内容の詳細
@@ -410,6 +416,15 @@ class LibriTTSRDataset(Dataset):
 - [ ] `test_invalid_mode_raises`: `mode="test"` 等で `AssertionError`
 - [ ] `test_wav_sample_rate_check`: 24000 以外の wav (mock) で `ValueError`
 
+#### M2 phase review 追加テスト
+- [ ] `test_getitem_returns_batch_typed_dict`: `__getitem__(0)` の戻り値が `dict` で `{"mel", "audio", "n_samples"}` キーを持つ (`Batch` TypedDict 整合性)
+- [ ] `test_return_mel_false_raises_not_implemented`: `LibriTTSRDataset(..., return_mel=False)` の `__getitem__` が `NotImplementedError` (M5 で MelOnGPU 実装予約)
+- [ ] `test_dataset_picklable`: `pickle.dumps(dataset)` が成功 (Windows `spawn` 経由の worker 起動 pickle-safe 確認)
+- [ ] `test_seed_worker_function_exists`: `from wavenext2.data.dataset import seed_worker` で import 可能、`seed_worker(0)` 呼び出しが例外なし
+- [ ] `test_seed_worker_isolates_rng_per_worker`: `seed_worker(0)` と `seed_worker(1)` で `np.random.rand()` 値が異なる (worker_id 分散)
+- [ ] `test_gan_184_sample_excess`: GAN config で `audio.shape[0] == 16384`、`(mel.shape[1] - 1) * hop == 16200`、差 184 sample の存在を assert で確認 (Discriminator 側責務として明示)
+- [ ] `test_diff_no_excess`: Diff config で `(mel.shape[1] - 1) * hop == segment_length == 25600` の **ぴったり整合** を確認
+
 ### 5.2 e2e / 結合テスト
 - [ ] `uv run python -c "from wavenext2.data.dataset import LibriTTSRDataset; print(LibriTTSRDataset)"` で import 成立
 - [ ] LibriTTS-R sample 数件 (test-clean から fixture) で `dataset = LibriTTSRDataset.from_config(cfg)` → `len(dataset) > 0` → `dataset[0]` が成功 (T-M0.3 完了後に実行可能、それまで `@pytest.mark.slow` で skip)
@@ -479,9 +494,39 @@ class LibriTTSRDataset(Dataset):
 - **反射 pad で短い wav が壊れるリスク**:
   - `F.pad(mode="reflect")` は pad_len > T で失敗する (`RuntimeError`)。LibriTTS-R に segment_length より極端に短い wav (例: 0.1 秒) が混ざっていた場合 OOM 前にエラー → T-M0.3 で `--min-duration=1.0` (1 秒) フィルタ済み (`docs/tickets/T-M0.3-libritts-r.md` §2.3) のため通常起きない
 
-- **`np.random` と `torch.utils.data.DataLoader` worker のシード分散**:
-  - `num_workers > 0` で各 worker が同じ seed を持つと epoch 毎に同じ random crop になるリスク
-  - **対応**: T-M2.5 で `worker_init_fn` を設定 (本チケットは責務外、`README` メモのみ)
+- **`np.random` と `torch.utils.data.DataLoader` worker のシード分散** (M2 phase review 昇格):
+  - `num_workers > 0` で各 worker 内で `np.random.default_rng(seed=None)` 由来の seed が同一になり、**同じ epoch で同じ crop が出続ける** 罠 (各 worker が同じ seed sequence を持つため、batch ごとに同じ region を crop する)
+  - **対応方針**: `worker_init_fn` で `epoch * num_workers + worker_id` を seed 化 (`np.random.seed(initial_seed + worker_id)` ではなく **epoch も加算** することが必須)
+  - **テンプレ snippet を §9.1 に置く**: T-M2.5 / T-M3.2 はこれを import するだけにする (責務移譲を **本チケット §9.1 で完結**、T-M2.5 へは「snippet を import せよ」の連絡のみ)
+  - **§9.1 連絡先**: T-M2.5 (GAN training), T-M3.2 (Diff training)
+
+- **`(T_mel - 1) * hop != segment_length` の差 184 sample の責務** (M2 phase review 追加):
+  - GAN: `segment_length=16384, hop=300` → `T_mel = floor(16384/300) + 1 = 55` → `(55 - 1) * 300 = 16200`、`16384 - 16200 = 184 sample` の余剰
+  - Diff: `segment_length=25600, hop=256` → `T_mel = floor(25600/256) + 1 = 101` → `(101 - 1) * 256 = 25600`、**Diff は ぴったり** 整合 (256 が 25600 の約数)
+  - **責務**: Discriminator / MR-STFT loss が末尾 184 sample を無視 (zero pad or crop) するかは別問題 (T-M2.2 / T-M2.3)、**Dataset 内** では以下を担保:
+    - 戻り値 audio は **常に `segment_length` ちょうど** (16384 / 25600)
+    - 戻り値 mel は **`floor(segment_length / hop) + 1`** frame (GAN=55 / Diff=101)
+    - 整合性 assertion は `(T_mel - 1) * hop <= segment_length < T_mel * hop` の範囲 (GAN は **不等式**、Diff は **等式**)
+  - **集計時の zero-pad / crop**: 末尾 184 sample は Discriminator / loss に渡る audio に含まれるが mel と整合しない領域。**T-M2.4 (Generator) / T-M2.2 (Discriminator) で末尾扱いを明示** する申し送りを §9.1 に追加
+
+- **`torchaudio.sox_effects` の Linux CI 依存** (M2 phase review 追加):
+  - Windows (T-M0.1 §6) では torchaudio backend に `sox_io` が同梱されるが、**Linux CI runner では `apt install libsox-dev` が必要**
+  - `.github/workflows/test.yml` の OS matrix に Linux を含める場合は `apt-get install -y libsox-dev` step 追加が必須
+  - **本チケットの責務**: T-M0.2 (CI 構築) への申し送り (§9.1)
+  - **検知**: 本チケット tests を Linux CI で実行して `sox_io` backend 利用可能を確認
+
+- **Dataset テスト実行時間上限 15s** (M2 phase review 追加):
+  - M2 全体の unit test 目標 < 60s (smoke 除く) から逆算、本チケット tests は **15 秒以内** で完了させる
+  - 各 test に `@pytest.mark.timeout(5)` を付与 (個別 5 秒)
+  - 重い fixture (5 秒 wav 生成) は `session` scope で 1 回だけ生成
+
+- **`spawn` vs `fork` の OS 別挙動** (M2 phase review 昇格):
+  - Windows: `spawn` (default) → Dataset を **pickle-safe** にする必要あり (`mel_transform` が `register_buffer` を持つため、worker 起動毎に LogMelSpectrogram を再構築 → 起動コスト増)
+  - Linux: `fork` (default) → pickle 不要、worker 起動高速
+  - **責務**: T-M2.5 への申し送り (本チケット では `mel_transform` の `register_buffer` (mel filterbank 等) が pickle 可能であることを test で確認 → `test_dataset_picklable` 追加)
+  - **§9.1 連絡先**: T-M2.5 / T-M3.2 へ `multiprocessing_context="spawn"` または `"fork"` の明示と `prefetch_factor` 設定の申し送り
+
+- **`(T_mel-1)*hop != segment_length` 差の検証**: 上記 184 sample 余剰の責務確認
 
 ### 6.2 仕様の曖昧さ
 - `docs/open-questions.md` で関連項目はすべて確定済み
@@ -533,6 +578,51 @@ class LibriTTSRDataset(Dataset):
 
 ### 8.1 別の設計を採るとしたら
 
+#### 採用昇格 (M2 phase review)
+- **`__getitem__` 戻り値を `dataclass Batch` / `TypedDict` に統一** (現状 tuple → 破壊的変更コスト大):
+  - 現状の `(log_mel, audio)` tuple は M3 で `noise_level`、M4 で `speaker_id` を追加する際に **後続全タスクの破壊的変更** になる
+  - **採用**: `TypedDict` (Python 3.10+ で `total=False` が使える、最も軽量):
+    ```python
+    from typing import TypedDict
+    class Batch(TypedDict, total=False):
+        mel: torch.Tensor      # (n_mels, T_mel)
+        audio: torch.Tensor    # (segment_length,)
+        n_samples: int         # 元の wav の長さ (BucketSampler 用)
+        # M3 で追加: noise_level: torch.Tensor
+        # M4 で追加: speaker_id: int
+    ```
+  - **前方互換**: T-M2.5 / T-M3.2 / T-M3.4 で `batch["mel"], batch["audio"]` のみ参照、M3 で `noise_level` 追加時も既存コード無変更
+  - **却下案**: `dataclass(frozen=True)` は collate_fn でフィールド追加が面倒、`NamedTuple` は順序依存
+  - **§9.1 連絡先**: T-M2.5 / T-M3.2 / T-M3.4 で `Batch` TypedDict を共有 import
+
+- **`worker_init_fn` テンプレ snippet を本チケット §9.1 に置く**:
+  - 責務移譲: 「T-M2.5 の責務」で逃げず、本チケット §9.1 で **完成形 snippet** を提供する
+  - T-M2.5 / T-M3.2 は snippet を `from wavenext2.data.dataset import seed_worker` で import するだけ
+  - **本体実装**: `src/wavenext2/data/dataset.py` 末尾に `seed_worker(worker_id: int) -> None` を関数として置く (§9.1 でテンプレ snippet を明示)
+
+#### 検討追加 (M2 phase review)
+- **`MelOnGPU` モード予約** (`return_mel: bool = True`):
+  - `__init__(..., return_mel: bool = True)` 引数を追加。`False` の場合 `__getitem__` は **audio のみ** 返す (mel は collate_fn 後 GPU で抽出)
+  - M5 で CPU 律速 (GPU 利用率 < 70%) が判明した時の **第 3 の選択肢** (案 A precompute / 案 B num_workers / **案 D MelOnGPU**)
+  - **再評価トリガー**: M5 smoke で CPU 律速かつ precompute がキャッシュ容量で困難な場合
+  - **本チケットでの扱い**: `return_mel: bool = True` 引数だけ追加、`False` ブランチは `NotImplementedError` (M5 で実装)
+
+- **`segment_length=24576` (Vocos 流)** をトレードオフ表に追加:
+  - HiFi-GAN: 8192 / 本実装 GAN: 16384 / **Vocos**: 24576 / 本実装 Diff: 25600
+  - **24576 = 2^14 + 2^13 = 16384 + 8192**、`hop=300` で `T_mel = 82+1 = 83 frame`、`hop=256` で `T_mel = 96+1 = 97 frame`
+  - MR-STFT `n_fft=2048` で実質 **`24576 / 2048 = 12 frame** → 8 frame 以上確保、loss 収束が安定
+  - **再評価トリガー**: **M5.1 で MR-STFT 収束が遅い場合** (loss curve が plateau)
+  - **本チケットでは GAN=16384 維持**、Vocos 24576 は config 切替のみで対応可能 (`segment_length` を YAML 経由)
+
+- **`rms_dbfs` 正規化案** (peak の代わりに RMS 正規化):
+  - 現状 sox `norm` は **peak-based** で LibriTTS-R の RMS ばらつきに脆弱 (静かな utterance と大きな utterance で perceptual loudness が揃わない)
+  - T-M0.3 で `peak_dbfs` / `rms_dbfs` 両方を filelist 列に持つのに **peak のみ** 使用は勿体ない
+  - **却下根拠**: Vocos `vocos/dataset.py` L42-43 も **peak (`norm`)** 採用、再現性優先
+  - **代替案**: `torchaudio.transforms.Loudness` (LUFS) や ITU-R BS.1770-4 RMS normalization
+  - **再評価トリガー**: M5 smoke で perceptual quality (UTMOS) が低い場合、RMS 正規化との A/B test
+
+#### 既存案
+
 | 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
 |---|---|---|---|---|
 | **precompute mel** (`scripts/extract_mel.py` で全 wav の log-mel を `.npy` キャッシュ) | DataLoader CPU 負荷激減、本格訓練 (M6 410h) で GPU 待ち減 | キャッシュ容量 (LibriTTS-R 460h × 128 mel × ~80 frames/sec ≈ 数十 GB)、sox norm を pre-apply するか on-the-fly かの判断必要、`scripts/extract_mel.py` の保守 | M2 smoke では on-the-fly で十分。**M5 phase review で DataLoader bottleneck (GPU < 70%) 検知時に移行** | **M5 smoke で GPU 利用率 < 70%** |
@@ -548,26 +638,36 @@ class LibriTTSRDataset(Dataset):
 | **stereo 対応 (mono 化せず 2ch のまま)** | データ情報量増 | LibriTTS-R は mono が大半、Vocos と非互換 | Vocos 慣例 (mean(dim=0)) を踏襲 | (再評価しない) |
 | **dataset を `webdataset` 化 (M6 視点)** | 大規模分散訓練に最適 | shard 設計コスト | **M6 で本格訓練起動時に再評価**、本チケットでは見送り | M6 起動時に再評価 |
 | **mel と audio を別ファイルキャッシュ** | mel cache + audio on-the-fly のハイブリッド | キャッシュ管理が複雑 | precompute するなら全て precompute、しないなら全て on-the-fly が単純 | (再評価しない) |
-| **speaker-balanced batch sampler** | 1 batch 内で話者多様性、特定話者過学習防止 | 実装複雑、効果は smoke で確認後判断 | M2 smoke で speaker bias が観測されたら採用 | M2 smoke で speaker bias 観測 |
+| **speaker-balanced batch sampler** | 1 batch 内で話者多様性、特定話者過学習防止 | 実装複雑、効果は smoke で確認後判断 | **M2 smoke は 1 sample over-fit のため speaker bias は観測不可能**。**T-M5.1 (1 epoch) 後の validation MR-STFT 話者分散検査** で判断 | **T-M5.1 (1 epoch) validation MR-STFT 話者分散検査時** |
 
 ### 8.2 思想 / 哲学の見直し
 - **このサブタスクの粒度**: 適切 (size=M)。LibriTTSRDataset 1 クラス + sox norm + 反射 pad/crop + mel 結合の thin layer。T-M0.3 (filelist) と T-M1.3 (mel) の集約点
 - **factory パターン一貫化**: T-M1.3 / T-M1.6 と同じく `from_config(cls, cfg, mode, seed)` を採用。M1 phase review の横断方針と整合
 - **SoT 強制**: `mel_cfg["hop_length"] == hop_length` の runtime check で SoT drift を fail-fast
+- **mel 抽出を Dataset 内に閉じ込めない哲学** (M2 phase review):
+  - 現状: Dataset = 「filelist 読み込み + 正規化 + 切り出し + mel 抽出 + 整合性検証」を全て閉じ込めている
+  - **問題**: CPU 律速が判明した時の **唯一の改善経路が precompute だけ** に縛られる (DataLoader 並列を増やしても CPU で mel 抽出は逃れられない)
+  - **修正**: `return_mel: bool = True` 引数で raw audio のみ返すモードを **設計上残しておく** (実装は M5 で必要時に行う)
+  - **第 3 の選択肢**: 案 A precompute / 案 B num_workers / **案 D MelOnGPU (collate_fn 後 GPU で mel)** という 3 つの逃げ道を確保
+  - 哲学: 「**1 つの責務を 1 つの場所に閉じる**」より「**律速判明時に逃げ道を残す**」を優先 (Vocos は閉じ込めているが、本実装は M5/M6 の本格訓練で 410h かかるため逃げ道が重要)
 - **責務分離**:
-  - Dataset = 「filelist 読み込み + 正規化 + 切り出し + mel 抽出 + 整合性検証」までで止める
-  - BucketSampler / DataLoader 設定 / worker_init_fn = T-M2.5 / T-M3.2 の責務
+  - Dataset = 「filelist 読み込み + 正規化 + 切り出し + (オプショナル) mel 抽出 + 整合性検証」までで止める
+  - BucketSampler / DataLoader 設定 = T-M2.5 / T-M3.2 の責務
+  - `worker_init_fn` テンプレ snippet = **本チケット §9.1 で提供**、T-M2.5 / T-M3.2 は import するだけ (M2 phase review で責務移譲を完結)
   - mel precompute = `scripts/extract_mel.py` の責務 (本チケットでは作らない)
   - post-filter dev set 切り出し = T-M3.4 の責務 (本チケットは `dev_postfilter.tsv` を読む Dataset としては未対応、T-M3.4 で `LibriTTSRDataset(filelist=dev_postfilter.tsv, mode="val")` を使う想定)
 
 ### 8.3 再評価トリガー条件まとめ
 | 設計判断 | 再評価タイミング | 想定変更 |
 |---|---|---|
-| on-the-fly mel | M5 smoke | GPU 利用率 < 70% で precompute へ |
+| on-the-fly mel | M5 smoke | GPU 利用率 < 70% で precompute / MelOnGPU へ |
+| `return_mel: bool` MelOnGPU 第 3 の選択肢 | M5 smoke | CPU 律速 + precompute がディスク容量で困難なら採用 |
 | Sampler 戦略 (random) | T-M2.5 / M5 | BucketSampler / LengthSampler 採用 |
-| sox `norm` | T-M0.1 sox_io 検証 | Windows で fail なら `torchaudio.functional.gain` へ fallback |
+| sox `norm` (peak-based) | T-M0.1 sox_io 検証 / M5 UTMOS 低下 | Windows fail なら `torchaudio.functional.gain` へ fallback / 知覚品質低下なら `rms_dbfs` 正規化 |
 | webdataset | M5 完了 / M6 起動 | I/O 律速判明時 |
-| speaker-balanced batch | M2 smoke | speaker bias 観測時 |
+| speaker-balanced batch | **T-M5.1 (1 epoch) validation MR-STFT 話者分散検査** | 話者分散が極端な場合に採用 (M2 smoke は 1 sample で不可能) |
+| `segment_length=24576` (Vocos 流) | **M5.1 MR-STFT 収束が遅い場合** | GAN config を 16384 → 24576 へ切替 |
+| `Batch` TypedDict 戻り値 | **本チケットで採用済** | M3 で `noise_level`、M4 で `speaker_id` 追加に前方互換 |
 
 ### 8.4 学んだこと (チケット完了後に追記)
 - 実装中に判明した想定外: (未記入)
@@ -580,8 +680,7 @@ class LibriTTSRDataset(Dataset):
 #### T-M2.5 (train_gan)
 - **使用方法**:
   ```python
-  from wavenext2.data.dataset import LibriTTSRDataset
-  from torch.utils.data import DataLoader
+  from wavenext2.data.dataset import LibriTTSRDataset, seed_worker, Batch
 
   train_dataset = LibriTTSRDataset.from_config(cfg["data_train"], mode="train")
   val_dataset = LibriTTSRDataset.from_config(cfg["data_val"], mode="val")
@@ -592,29 +691,70 @@ class LibriTTSRDataset(Dataset):
       num_workers=8,
       shuffle=True,
       pin_memory=True,
-      worker_init_fn=seed_worker,  # T-M2.5 で実装、np.random worker 分散
+      worker_init_fn=seed_worker,           # 本チケットで提供する snippet
+      prefetch_factor=2,                    # default、I/O 律速時は 4 へ
+      persistent_workers=True,              # epoch 間で worker 再生成回避
+      multiprocessing_context="spawn",      # Windows / Linux 共通
   )
   ```
+- **`worker_init_fn` テンプレ snippet (本チケット §9.1 で提供、T-M2.5 / T-M3.2 はこれを import)**:
+  ```python
+  # src/wavenext2/data/dataset.py 末尾に配置
+  import numpy as np
+  import torch
+
+  def seed_worker(worker_id: int) -> None:
+      """DataLoader worker_init_fn: epoch * num_workers + worker_id で seed.
+
+      `num_workers > 0` で各 worker が同じ epoch で同じ crop を出す罠を回避.
+      `torch.initial_seed()` は DataLoader が `base_seed + worker_id` を毎 epoch
+      振り直すため、これを numpy seed に再注入することで全 RNG を同期する.
+      """
+      worker_seed = torch.initial_seed() % 2**32
+      np.random.seed(worker_seed)
+      # Dataset 内の `self._rng = np.random.default_rng(seed)` は __init__ 時の
+      # seed (None or 固定) を保持するが、worker fork/spawn 後は worker_seed で
+      # 上書きする必要あり (DataLoader が `worker_init_fn` 経由で各 worker で再 seed)
+      info = torch.utils.data.get_worker_info()
+      if info is not None and hasattr(info.dataset, "_rng"):
+          info.dataset._rng = np.random.default_rng(worker_seed)
+  ```
+- **`spawn` vs `fork` 挙動** (M2 phase review):
+  - **Windows**: `spawn` (default) → Dataset は **pickle-safe** であること必須。`mel_transform` が `register_buffer` を持つため、worker 起動毎に LogMelSpectrogram を再構築 → 起動コスト増 (但し `persistent_workers=True` で epoch 間は再利用)
+  - **Linux**: `fork` (default) → pickle 不要、worker 起動高速。但し CUDA initialized state の inherit に注意 (`fork` 後 CUDA 操作は禁止、`torchaudio.load` のみで OK)
+  - **`multiprocessing_context="spawn"` を明示** することで OS 間の挙動差を吸収 (本チケット は test で `test_dataset_picklable` を追加して spawn 動作確認)
+- **`prefetch_factor` 明示**:
+  - default = 2 (各 worker が 2 batch 先読み)
+  - I/O 律速 (M5 smoke で GPU 利用率 < 70%) 検知時は `prefetch_factor=4` へ
+- **`Batch` TypedDict 共有** (M2 phase review 採用昇格):
+  - `from wavenext2.data.dataset import Batch` で T-M2.5 / T-M3.2 / T-M3.4 が共通利用
+  - 現状フィールド: `mel`, `audio`, `n_samples`
+  - M3 で `noise_level` 追加、M4 で `speaker_id` 追加 (`TypedDict(total=False)` で前方互換)
 - **重要事項**:
   - `dataset.n_samples` (list[int]) を BucketSampler に渡せる (本チケットで属性公開)
-  - `worker_init_fn` の実装は T-M2.5 の責務 (本チケット未着手)
   - `cfg["data_train"]["segment_length"] = 16384`、`cfg["data_val"]["segment_length"] = 16384`
   - `cfg["data_train"]["mel"]` は GAN config (n_fft=2048, hop=300, win=1200)
   - DataLoader CPU bound 検知時の precompute 移行 (§8.1) を T-M5.1 で評価
+  - 末尾 184 sample の Discriminator / MR-STFT loss での扱い (zero-pad / crop) は T-M2.2 / T-M2.3 で明示
 - **想定 epoch step 数**: train.tsv ~145k 行 / batch_size=16 ≈ 9k step/epoch
 
 #### T-M3.2 (train_diff)
 - **使用方法**:
   ```python
+  from wavenext2.data.dataset import LibriTTSRDataset, seed_worker, Batch
+
   diff_dataset = LibriTTSRDataset.from_config(cfg["data_train"], mode="train")
-  # cfg["data_train"]["segment_length"] = 25600
+  # cfg["data_train"]["segment_length"] = 25600  ← config 経由で切替 (本チケットでは同じ Dataset クラス)
   # cfg["data_train"]["hop_length"] = 256
   # cfg["data_train"]["mel"] = {n_fft=1024, hop=256, win=1024, ...}
   ```
 - **重要事項**:
-  - `segment_length=25600` (FastDiff 慣例) で GAN と切替
+  - **同じ Dataset クラス** で segment_length=25600 へ切替 (config 経由のみ、本体改修不要) — M2 phase review で明示
+  - **`Batch` TypedDict 共有**: M3 で `noise_level: torch.Tensor` フィールドを `total=False` で追加 (既存 T-M2.5 コードに無影響)
+  - `seed_worker` snippet を共有 import (本チケット §9.1 で提供)
+  - `segment_length=25600` (FastDiff 慣例) で GAN と切替 (256 が 25600 の約数なので `(T_mel-1)*hop == segment_length` ぴったり整合、GAN の 184 sample 余剰問題なし)
   - 4 sub-model 訓練で同じ Dataset インスタンスを共有可能 (band sampler 側で noise level を切替)
-  - batch_size=20 (FastDiff default)、num_workers=8
+  - batch_size=20 (FastDiff default)、num_workers=8、`multiprocessing_context="spawn"`
 
 #### T-M2.6 (GAN smoke) / T-M3.5 (Diff smoke)
 - **使用方法**: `LibriTTSRDataset.from_config(cfg, mode="val", seed=42)` で 1 utterance を deterministic 取得
@@ -636,6 +776,29 @@ class LibriTTSRDataset(Dataset):
 #### T-M1.6 (Sub-model) との連絡
 - T-M1.6 §6.1 critical 項目 `y_prev.shape == T_mel * hop` か `(T_mel - 1) * hop` かの選択を確定する必要あり
 - 本 Dataset は **`(T_mel - 1) * hop == segment_length` 規約** を採用するため、T-M1.6 / T-M2.4 (GAN モデル) で `y_prev = torch.zeros_like(audio)` を生成する際に `audio.shape[0] = (T_mel - 1) * hop` 想定で OK
+
+#### T-M0.2 (CI 構築) への申し送り (M2 phase review 追加)
+- **Linux CI runner で `libsox-dev` 依存** が必要 (`torchaudio.sox_effects` が Linux runner で動作するため)
+- **`.github/workflows/test.yml` に apt step 追加要請**:
+  ```yaml
+  # .github/workflows/test.yml に追加
+  - name: Install sox dependency (Linux only)
+    if: runner.os == 'Linux'
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y libsox-dev libsox-fmt-all
+  ```
+- **Windows runner**: torchaudio backend に `sox_io` が同梱されるため追加 install 不要 (T-M0.1 §6 で確認済み前提)
+- **macOS runner**: 本プロジェクトでは未対応 (T-M0.1 で Windows + Linux のみサポート決定)
+- **本チケットの test** は CI Windows + Linux runner の両方で pass することを確認 (T-M0.2 で CI matrix 設定)
+
+#### T-M2.2 (Discriminator) / T-M2.3 (Loss) への申し送り (M2 phase review 追加)
+- **GAN の末尾 184 sample 余剰** (`segment_length=16384, hop=300` → `(T_mel-1)*hop = 16200`、余剰 184 sample) の扱い:
+  - audio は 16384 サンプル丸ごと渡るが mel と整合する領域は **先頭 16200 sample**
+  - **Discriminator (MSD ×3)**: 全 16384 sample をそのまま処理 (mel との整合は不要、生波形を直接識別)
+  - **MR-STFT loss (T-M2.3)**: STFT 計算は audio を直接使用するため 16384 全てが loss に寄与 (但し center=True / padded mode により末尾は reflect で扱われる)
+  - **Generator 出力 (T-M2.4)**: `Generator` の出力長 = `T_mel * hop` か `(T_mel-1) * hop` か は T-M2.4 で決定 (本 Dataset は GT audio 側を **`segment_length=16384` ぴったり**で固定するため、Generator が 16200 出力なら **末尾 184 を zero-pad**、16384 出力なら整合不要)
+- **Diff の場合**: `segment_length=25600, hop=256` で **`(T_mel-1)*hop = 25600`** ぴったり整合 (余剰なし)
 
 ### 9.2 設定値 (YAML)
 - 完了時に `configs/{gan,diff}_wavenext2.yaml` の `data:` セクションに以下を追加:
@@ -672,7 +835,11 @@ class LibriTTSRDataset(Dataset):
   - [ ] (該当時) `docs/training.md` §1.3 「セグメント長」表記の確定値を更新 (M1.3 phase review で T_mel pin 完了後)
 
 ### 9.4 Open question として残ったもの
-- **DataLoader bottleneck 判明時の precompute 移行戦略**: M5 smoke 完了時に再評価 (§8.1 「precompute mel」)
+- **DataLoader bottleneck 判明時の precompute 移行戦略**: M5 smoke 完了時に再評価 (§8.1 「precompute mel」 / 「MelOnGPU 第 3 の選択肢」)
 - **BucketSampler / LengthSampler 採用判断**: T-M2.5 で `dataset.n_samples` を活用するか判断
 - **Windows での sox_effects 動作確証**: T-M0.1 Acceptance で sox_io が CI 検証済みであることを本チケット完了時に再確認、fail なら §8.1 fallback (`torchaudio.functional.gain`) を採用
+- **Linux CI での `libsox-dev` install**: T-M0.2 申し送りで `.github/workflows/test.yml` に apt step 追加 (M2 phase review 追加)
 - **`webdataset` 化**: M6 本格訓練で I/O 律速が判明したら採用検討、`docs/open-questions.md` への追記は本チケット時点では不要
+- **`segment_length=24576` (Vocos 流) 切替判断**: M5.1 MR-STFT 収束が遅い場合に GAN config を 16384 → 24576 へ (M2 phase review 追加)
+- **`rms_dbfs` 正規化採用判断**: M5 smoke で UTMOS / perceptual quality が低下した場合に peak ベースから RMS ベースへ切替 (M2 phase review 追加)
+- **speaker-balanced batch 採用判断**: T-M5.1 (1 epoch) validation MR-STFT 話者分散検査時 (M2 smoke は 1 sample のため不可能、M2 phase review でトリガー変更)

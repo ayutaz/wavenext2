@@ -48,17 +48,22 @@ GAN-WaveNeXt 2 の **訓練ループ本体** を 1 ファイル (`src/wavenext2/
 
 ### 2.1 対象ファイル
 - 新規実装 (T-M0.2 で空 stub として配置済み or 未配置):
-  - `src/wavenext2/train/train_gan.py` (本実装)
+  - `src/wavenext2/train/train_gan.py` (本実装、`main()` + `train_gan_step()` 公開関数)
   - `src/wavenext2/utils/scheduler.py` (`InverseLR` を実装、Diff 側 T-M3.2 でも将来再利用可能性あり)
-  - `tests/test_train_gan.py` (smoke step テスト)
+  - `tests/test_train_gan.py` (smoke step テスト、`train_gan_step` を直接呼ぶ)
   - `tests/test_inverse_lr.py` (scheduler 数式テスト)
 - 編集:
-  - `src/wavenext2/train/__init__.py` (`__all__` に `main` を追加、`from .train_gan import main`)
+  - `src/wavenext2/train/__init__.py` (`__all__` に `main`, `train_gan_step` を追加、`from .train_gan import main, train_gan_step`)
   - `src/wavenext2/utils/__init__.py` (`__all__` に `InverseLR` を追加)
   - `configs/gan_wavenext2.yaml` (T-M0.2 で生成済の雛形を本実装用にキー追加: `validation.interval_steps`, `checkpoint.dir`, `checkpoint.interval_steps`, `logging.tensorboard_dir`)
   - `pyproject.toml` の `[project.scripts]` に `train-gan = "wavenext2.train.train_gan:main"` を追加 (任意、後続 M5/M6 の便宜のため)
   - `docs/milestones.md` §M2.5 Acceptance チェックボックス更新
   - `docs/tickets/index.md` T-M2.5 ステータス更新
+
+> **重要 (§8.1 採用昇格)**: `train_gan_step(G, D, opt_G, opt_D, mel, audio, cfg) -> dict[str, float]` を **公開関数** として切り出す。理由:
+> - T-M2.6 smoke が `from train_gan import train_gan_step` で再利用 (`scripts/smoke_gan.py` は薄い wrapper にできる)
+> - T-M3.2 (train_diff) で `train_diff_step` を同 signature にすると `tests/conftest.py` の fixture 共用が可能
+> - 将来 `pytorch-lightning` 移行時はロジックを `LightningModule.training_step` に移すだけで済む (Lightning-ready architecture)
 
 ### 2.2 主要構造
 
@@ -81,12 +86,19 @@ from wavenext2.utils.scheduler import InverseLR
 - EMA: 不使用 (docs/open-questions.md 確定)
 - Logging: TensorBoard (step ごとに loss、10k step ごとに validation + sample audio)
 
-Entry point は `main()` (click CLI)。
+公開 API:
+- `main(...)`: click CLI entry point (loop / checkpoint / logging を統括)
+- `train_gan_step(G, D, opt_G, opt_D, mel, audio, cfg) -> dict[str, float]`:
+  1 step alternating update を実行し loss scalar の dict を返す。
+  T-M2.6 smoke / T-M3.2 (train_diff_step) / 将来の Lightning 移行で再利用される唯一の公開関数。
+  返り値 dict のキー: `loss_G`, `loss_D`, `loss_g_gan`, `loss_g_fm`, `loss_g_mrstft_sc`,
+  `loss_g_mrstft_mag`, `loss_d_real`, `loss_d_fake`, `grad_norm_G`, `grad_norm_D`
 """
 
 from __future__ import annotations
 
 import os
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -164,6 +176,14 @@ def main(config_path: str, resume_path: str | None, debug: bool, amp: bool) -> N
     # ===== Logging =====
     writer = SummaryWriter(cfg["logging"]["tensorboard_dir"])
 
+    # ===== Emergency save on SIGTERM/SIGINT (M6 cluster preemption 対策) =====
+    def _emergency_save(signum: int, frame: Any) -> None:  # noqa: ARG001
+        save_checkpoint(G, D, opt_G, opt_D, sch_G, sch_D, state,
+                        Path(cfg["checkpoint"]["dir"]) / f"emergency_step_{state.step}.pt")
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _emergency_save)
+    signal.signal(signal.SIGINT,  _emergency_save)
+
     # ===== Training loop =====
     G.train()
     D.train()
@@ -173,48 +193,35 @@ def main(config_path: str, resume_path: str | None, debug: bool, amp: bool) -> N
 
         mel, x_gt = batch["mel"].to(device), batch["audio"].to(device)
 
-        # --- Generator forward ---
-        with torch.autocast(device_type="cuda", dtype=dtype, enabled=amp):
-            y_hat = G(mel, audio_length=x_gt.shape[-1])
-
-        # --- Discriminator update ---
-        opt_D.zero_grad(set_to_none=True)
-        d_real = D(x_gt.unsqueeze(1))
-        d_fake = D(y_hat.detach().unsqueeze(1))
-        loss_D = crit_gan.d_loss(d_real, d_fake)
-        loss_D.backward()
-        torch.nn.utils.clip_grad_norm_(D.parameters(), max_norm=cfg["train"]["grad_clip_norm"])
-        opt_D.step()
-        sch_D.step()
-
-        # --- Generator update ---
-        opt_G.zero_grad(set_to_none=True)
-        d_fake_for_g = D(y_hat.unsqueeze(1))
-        d_real_for_fm = D(x_gt.unsqueeze(1))
-        loss_g_gan   = crit_gan.g_loss(d_fake_for_g)
-        loss_g_fm    = crit_fm(d_real_for_fm, d_fake_for_g) * cfg["loss"]["weights"]["d_fm"]
-        loss_g_sc, loss_g_mag = crit_mrstft(y_hat, x_gt)
-        loss_g_sc    = loss_g_sc  * cfg["loss"]["weights"]["mrstft_sc"]
-        loss_g_mag   = loss_g_mag * cfg["loss"]["weights"]["mrstft_mag"]
-        loss_G = loss_g_gan + loss_g_fm + loss_g_sc + loss_g_mag
-        loss_G.backward()
-        torch.nn.utils.clip_grad_norm_(G.parameters(), max_norm=cfg["train"]["grad_clip_norm"])
-        opt_G.step()
-        sch_G.step()
+        # --- 1 step alternating update (公開関数) ---
+        logs = train_gan_step(G, D, opt_G, opt_D, sch_G, sch_D,
+                              mel, x_gt, cfg,
+                              crit_gan, crit_fm, crit_mrstft,
+                              amp=amp, dtype=dtype)
 
         # --- Logging ---
         if state.step % cfg["logging"]["scalar_interval_steps"] == 0:
-            log_scalars(writer, state.step, loss_G, loss_D,
-                         loss_g_gan, loss_g_fm, loss_g_sc, loss_g_mag,
-                         sch_G.get_last_lr()[0], sch_D.get_last_lr()[0])
+            log_scalars(writer, state.step, logs,
+                         lr_G=sch_G.get_last_lr()[0], lr_D=sch_D.get_last_lr()[0])
+        # SummaryWriter buffer leak 対策: 10k step ごとに flush
+        if state.step % 10000 == 0:
+            writer.flush()
+
+        # --- D 強すぎ問題の検知 ---
+        # `loss_D < 0.01` が 1000 step 連続なら警告ログ (§6.1 critical 項目)
+        state.update_d_loss_history(logs["loss_D"])
+        if state.d_loss_below_threshold_steps >= 1000:
+            logger.warning("loss_D < 0.01 for 1000 steps: D may be too strong (consider 1:2 update)")
 
         # --- Validation ---
         if state.step > 0 and state.step % cfg["validation"]["interval_steps"] == 0:
             val_mrstft = run_validation(G, val_loader, crit_mrstft, device, writer, state.step)
             if val_mrstft < state.best_val_mrstft:
                 state.best_val_mrstft = val_mrstft
+                # atomic rename で best.pt が中途半端な状態にならないことを保証 (T-M2.4 申し送り)
                 save_checkpoint(G, D, opt_G, opt_D, sch_G, sch_D, state,
-                                Path(cfg["checkpoint"]["dir"]) / "best.pt")
+                                Path(cfg["checkpoint"]["dir"]) / "best.pt",
+                                atomic=True)
 
         # --- Checkpoint ---
         if state.step > 0 and state.step % cfg["checkpoint"]["interval_steps"] == 0:
@@ -225,6 +232,96 @@ def main(config_path: str, resume_path: str | None, debug: bool, amp: bool) -> N
 
         if debug and state.step >= 1:
             break  # smoke
+
+    writer.flush()
+    writer.close()
+
+
+def train_gan_step(
+    G: nn.Module,
+    D: nn.Module,
+    opt_G: torch.optim.Optimizer,
+    opt_D: torch.optim.Optimizer,
+    sch_G: torch.optim.lr_scheduler.LRScheduler,
+    sch_D: torch.optim.lr_scheduler.LRScheduler,
+    mel: torch.Tensor,
+    audio: torch.Tensor,
+    cfg: dict,
+    crit_gan: nn.Module,
+    crit_fm: nn.Module,
+    crit_mrstft: nn.Module,
+    amp: bool = False,
+    dtype: torch.dtype = torch.float32,
+) -> dict[str, float]:
+    """1 step alternating update を実行し loss scalar の dict を返す.
+
+    重要: autocast 境界は G forward + D forward のみ。hinge GAN / FM / MR-STFT loss は
+    fp32 で計算 (bf16 underflow 回避、§6.1 通常項目「mixed precision」)。
+    T-M2.6 smoke / T-M3.2 (train_diff_step) / 将来の Lightning 移行で再利用される公開関数。
+
+    Returns:
+        dict with keys:
+            - loss_G, loss_D (total)
+            - loss_g_gan, loss_g_fm, loss_g_mrstft_sc, loss_g_mrstft_mag (G の sub-loss)
+            - loss_d_real, loss_d_fake (D の sub-loss、§6.1 通常項目で別ログ要請)
+            - grad_norm_G, grad_norm_D (clip_grad_norm_ の返り値)
+    """
+    # --- Generator forward (autocast 内) ---
+    with torch.autocast(device_type=mel.device.type, dtype=dtype, enabled=amp):
+        y_hat = G(mel, audio_length=audio.shape[-1])
+
+    # --- Discriminator update (forward は autocast、loss は fp32) ---
+    opt_D.zero_grad(set_to_none=True)
+    with torch.autocast(device_type=mel.device.type, dtype=dtype, enabled=amp):
+        d_real = D(audio.unsqueeze(1))
+        d_fake = D(y_hat.detach().unsqueeze(1))
+    # hinge GAN は fp32 (underflow 回避)
+    with torch.autocast(device_type=mel.device.type, enabled=False):
+        loss_d_real = sum((F.relu(1.0 - r[0].float())).mean() for r in d_real) / len(d_real)
+        loss_d_fake = sum((F.relu(1.0 + f[0].float())).mean() for f in d_fake) / len(d_fake)
+        loss_D = loss_d_real + loss_d_fake
+    loss_D.backward()
+    grad_norm_D = torch.nn.utils.clip_grad_norm_(
+        D.parameters(), max_norm=cfg["train"]["grad_clip_norm"]
+    )
+    opt_D.step()
+    sch_D.step()
+
+    # --- Generator update (forward は autocast、loss は fp32) ---
+    opt_G.zero_grad(set_to_none=True)
+    with torch.autocast(device_type=mel.device.type, dtype=dtype, enabled=amp):
+        d_fake_for_g  = D(y_hat.unsqueeze(1))
+        d_real_for_fm = D(audio.unsqueeze(1))
+    with torch.autocast(device_type=mel.device.type, enabled=False):
+        loss_g_gan = crit_gan.g_loss(d_fake_for_g)
+        loss_g_fm  = crit_fm(d_real_for_fm, d_fake_for_g) * cfg["loss"]["weights"]["d_fm"]
+        # MR-STFT は (total, unweighted_dict) tuple (T-M2.3 申し送り)
+        loss_g_mrstft_total, mrstft_unweighted = crit_mrstft(y_hat, audio)
+        loss_g_sc  = mrstft_unweighted["sc"]  * cfg["loss"]["weights"]["mrstft_sc"]
+        loss_g_mag = mrstft_unweighted["mag"] * cfg["loss"]["weights"]["mrstft_mag"]
+        loss_G = loss_g_gan + loss_g_fm + loss_g_sc + loss_g_mag
+    loss_G.backward()
+    grad_norm_G = torch.nn.utils.clip_grad_norm_(
+        G.parameters(), max_norm=cfg["train"]["grad_clip_norm"]
+    )
+    opt_G.step()
+    sch_G.step()
+
+    return {
+        "loss_G": loss_G.item(),
+        "loss_D": loss_D.item(),
+        "loss_g_gan":         loss_g_gan.item(),
+        "loss_g_fm":          loss_g_fm.item(),
+        "loss_g_mrstft_sc":   loss_g_sc.item(),
+        "loss_g_mrstft_mag":  loss_g_mag.item(),
+        "loss_d_real":        loss_d_real.item(),
+        "loss_d_fake":        loss_d_fake.item(),
+        "grad_norm_G":        float(grad_norm_G),
+        "grad_norm_D":        float(grad_norm_D),
+        # unweighted (T-M2.3 申し送り、TensorBoard 強制 log)
+        "loss_g_mrstft_sc_unweighted":  mrstft_unweighted["sc"].item(),
+        "loss_g_mrstft_mag_unweighted": mrstft_unweighted["mag"].item(),
+    }
 ```
 
 #### `scheduler.py` (`InverseLR`)
@@ -505,19 +602,25 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
 - [ ] `test_two_optimizers_independent`: G/D 別 scheduler が各 base_lr (1e-4, 2e-4) を独立に管理し、ratio 2:1 が全 step で保たれる
 
 #### `tests/test_train_gan.py`
+- [ ] `test_train_gan_step`: **`train_gan_step` を直接呼ぶ smoke** で 1 step backward が動き、戻り値 dict のキー (`loss_G`, `loss_D`, `loss_g_gan`, ...) が揃っていて全 value が `isfinite` (公開関数 API の検証、§5.5 / §8.1 採用昇格)
 - [ ] `test_smoke_step`: tmp config + tmp dataset (T-M2.1 fixture or random tensor) で 1 step 実行 → `loss_G`, `loss_D` が `isfinite` (milestones.md §M2.5 Acceptance #1)
 - [ ] `test_alternating_update_order`: D 更新後の D parameter と G 更新後の G parameter が **同 step 内で別々に変化** していることを `param.clone()` で前後比較
-- [ ] `test_grad_clip_applied`: `clip_grad_norm_` が呼ばれた直後の grad norm が `<= 1.0 + ε`
+- [ ] `test_grad_clip_applied`: `clip_grad_norm_` が呼ばれた直後の grad norm が `<= 1.0 + ε`、戻り値の `grad_norm_G` / `grad_norm_D` が clip 前の norm を返すことも確認
 - [ ] `test_no_ema`: model 内に EMA shadow parameter が存在しないこと (`docs/open-questions.md` 確定)
 - [ ] `test_checkpoint_save_load_roundtrip`: 1 step 実行 → save → 新インスタンス + load → step / opt state / sch state / RNG state / model state が完全一致 (milestones.md §M2.5 Acceptance #2)
+- [ ] `test_atomic_best_pt_rename`: `best.pt` 保存中に kill しても **中途半端な状態にならない** (`save_checkpoint(atomic=True)` で `best.pt.tmp` → `os.replace`、T-M2.4 申し送り)
 - [ ] `test_resume_continues_step`: `--resume` で `state.step` がチェックポイントから再開、`sch_G.last_epoch` も一致
 - [ ] `test_tensorboard_event_written`: 1 step 後に TensorBoard event file が `logs/gan/` に生成され、`loss_G`/`loss_D`/`lr_G`/`lr_D` の scalar が存在 (milestones.md §M2.5 Acceptance #3)
 - [ ] `test_validation_runs`: `--debug` モードでも 1 回 validation を強制呼び出し可能なヘルパで MR-STFT total が `isfinite`
 - [ ] `test_amp_bf16`: `--amp` 指定時に `y_hat.dtype in (torch.float32, torch.bfloat16)` (autocast 境界では float32 戻し)
+- [ ] `test_amp_autocast_boundary`: **hinge GAN loss が fp32 で計算される** ことを assert (`--amp` 有効でも `loss_D.dtype == torch.float32` および `loss_g_gan.dtype == torch.float32`、§6.1 通常項目「mixed precision」)
 - [ ] `test_hinge_d_loss_symmetry`: `D(real)=0, D(fake)=0` の場合 `loss_D = 2.0` (hinge formula の sanity check)
 - [ ] `test_hinge_g_loss_sign`: `D(fake)` の値が大きいほど `loss_g_gan` が小さい (`-D(fake).mean()` の sign 確認)
 - [ ] `test_seed_determinism`: 同 seed + 同 config + 同 batch で 1 step 後の `G.state_dict()` が deterministic
 - [ ] `test_lr_ratio_2_to_1`: `sch_D.get_last_lr()[0] / sch_G.get_last_lr()[0] ≈ 2.0` を全 step で確認
+- [ ] `test_sigterm_emergency_save`: `os.kill(os.getpid(), SIGTERM)` を別スレッドから送信し、`emergency_step_N.pt` が生成されることを確認 (§8.1 採用昇格)
+- [ ] `test_d_loss_below_threshold_counter`: `train_gan_step` を mock D で 1000 回呼び `state.d_loss_below_threshold_steps == 1000` を確認、warning ログが出力されること (§6.1 「D 強すぎ問題」)
+- [ ] `test_worker_init_fn_seed`: 2 epoch 目の最初の batch crop offset が 1 epoch 目と異なることを確認 (`worker_init_fn` で `epoch * num_workers + worker_id` を seed する罠の検証)
 
 ### 5.2 e2e / 結合テスト
 - [ ] `test_real_audio` (T-M0.3 完了後、`@pytest.mark.slow` で skip 可): LibriTTS-R 1 utterance で 5 step 実行、loss が `isfinite`、出力 audio が `[-1, 1]`
@@ -602,6 +705,32 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
 - **D の hinge loss が batch ごとに不均衡**:
   - real / fake サンプルがバッチで非対称だと `loss_D` の magnitude が振動
   - **対応**: 各 batch で `loss_real = relu(1-d_real).mean()` と `loss_fake = relu(1+d_fake).mean()` を **別々に TensorBoard ログ** して観察可能にする
+- **`iter_forever` + `persistent_workers=True` の組み合わせの seed 罠**:
+  - DataLoader が worker 再起動なしに新 epoch に入ると random crop seed が更新されず **同じ crop が繰り返される** 可能性
+  - **対応**: `worker_init_fn` で `epoch * num_workers + worker_id` を seed として渡す (T-M2.1 §9.1 のテンプレ snippet を採用)
+  - **検証**: 2 epoch 目の最初の batch が 1 epoch 目の最初の batch と異なる crop offset であることを確認
+- **`prefetch_factor` × `persistent_workers=True` の validation leak**:
+  - `prefetch_factor=2` (default) で `num_workers=8` だと **16 batch** が常に prefetch される。validation 中も persistent_workers が leak して GPU memory を圧迫する可能性
+  - **対応**: validation の `DataLoader` を **train とは別 instance** にして `persistent_workers=False`、validation 完了後に `del val_loader_iter` で明示的に閉じる
+- **disk full 監視**:
+  - `checkpoint.keep_last_n=5` でも `logs/gan/events.out.tfevents.*` が 2M step で数 GB に膨張
+  - SummaryWriter 内 `max_queue=10000` の buffer も memory leak 候補
+  - **対応**: `writer.flush()` を **10k step ごと明示**、`max_queue=1000` に縮小、`logs/` の disk usage を 100k step ごとに `shutil.disk_usage()` で確認しログ警告
+- **D 強すぎ問題の検知 (実装 scope 明記)**:
+  - `loss_D < 0.01 for 1000 steps` で alert/log を **本チケットの実装 scope に含める** (現状 §6.1 で言及あり、メトリクス TrainState に history buffer を保持して連続 step 数をカウント)
+  - 検知時は warning ログのみ (自動切替はしない、§8.1 再評価トリガーで M5 に判断を持ち越し)
+- **AMP autocast 境界の実装明示**:
+  - hinge GAN を fp32 で計算する旨は §8.1 にあるが、コード骨格 §2.2 で `loss_D = crit_gan.d_loss(...)` が autocast context 外に出ていない実装は **混乱を招く**
+  - **対応**: §2.2 擬似コード (`train_gan_step`) で `with torch.autocast(..., enabled=amp)` (G/D forward) と `with torch.autocast(..., enabled=False)` (loss 計算) を **明示的に nest** する構造に修正済 (上記擬似コード参照)
+  - **検証**: `tests/test_train_gan.py::test_amp_autocast_boundary` で hinge GAN loss が `--amp` 時も fp32 で計算されることを assert (dtype 検査)
+- **再現性 (`torch.use_deterministic_algorithms`)**:
+  - `uv.lock` + `torch.manual_seed` + `np.random.seed` だけでは GPU の atomic operations や cuDNN の non-deterministic algorithm により完全な再現は不可
+  - **対応**: M6 ablation で論文 MOS 差を測る際に必須、本チケットでは `--deterministic` フラグ (default off) で `torch.use_deterministic_algorithms(True)` + 環境変数 `CUBLAS_WORKSPACE_CONFIG=:4096:8` を提供
+  - **注意**: 本フラグ有効時は throughput が 30% 程度低下するため、本格訓練では off、ablation 比較時のみ on
+- **TensorBoard `add_audio` のストレージ膨張**:
+  - `validation.num_audio_samples=4` × 10k step interval = 200 validation × 4 utterance = **800 audio sample** = 数 GB 規模
+  - **対応**: `num_audio_samples=2` に半減 + mel spectrogram 画像のみで音声非保存 (`add_image` のみで `add_audio` 省略) の代替案を `configs/gan_wavenext2.yaml` でデフォルトに採用
+  - 音声を残す場合は `validation.audio_interval_steps=100000` で `add_audio` 頻度を validation 自体より下げる
 
 ### 6.2 仕様の曖昧さ
 
@@ -676,14 +805,37 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
     - (b) 1 ファイルに収めると `main()` を読むだけで訓練フロー全体が把握でき、再現実装の本来目的 (論文記述とコードの 1 対 1 対応) に合致
     - (c) M3.2 (Diff 訓練) では訓練フローが大きく異なる (4 sub-model 独立訓練 + MSE only) ので、共通抽象化のメリットが薄い
 
+- **【採用昇格】`train_gan_step(G, D, opt_G, opt_D, mel, audio, cfg) -> dict[str, float]` を公開関数として切り出し** (極めて重要、横断的):
+  - 理由 1: T-M2.6 smoke が `from train_gan import train_gan_step` で再利用、`scripts/smoke_gan.py` は薄い wrapper に
+  - 理由 2: T-M3.2 (train_diff) で `train_diff_step` を同 signature にすると `tests/conftest.py` の fixture 共用が可能 (`G`, `D`, optimizer, scheduler を再利用)
+  - 理由 3: 将来 `pytorch-lightning` 移行時にロジックを `LightningModule.training_step` に移すだけで済む (Lightning-ready architecture)
+  - 旧案 (`main()` 内インライン実装) は §1〜§8.0 で採用していたが、M2 phase review で採用昇格
+
+- **【採用昇格】SIGTERM/SIGINT handler で emergency checkpoint 保存**:
+  - `signal.signal(SIGTERM, lambda *_: save_emergency_ckpt())` を `main()` 起動直後に登録
+  - 理由: M6 cluster preemption (Slurm / Kubernetes) で SIGTERM 受信 → 数十秒の grace period → SIGKILL のシーケンスに対応必須、現状完全欠落
+  - 検証: `tests/test_train_gan.py::test_sigterm_emergency_save` で `os.kill(os.getpid(), SIGTERM)` 後に `emergency_step_N.pt` が生成されることを確認
+
+- **【採用昇格 (M3.2 着手前必須)】`utils/training_loop.py` への共通化**:
+  - 本チケットでは `train_gan.py` 内に `train_gan_step` を実装
+  - **M3.2 着手前に** `save_checkpoint` / `load_checkpoint` / `iter_forever` / `log_scalars` / `run_validation` を `utils/training_loop.py` に切り出す refactor を実行
+  - 旧 §6.3 「本チケットでは GAN 専用実装で十分」は撤回、M3.2 着手前必須に格上げ
+  - 再評価トリガー: M2.6 smoke pass 直後
+
 - **`InverseLR` を自作 (PyTorch 標準にないため)**
   - 理由: WaveFit-PT 慣例 + 論文記述。代替は `ExponentialLR` (warmup なし) / `CosineAnnealingWarmRestarts` (周期型) で論文 schedule に合致しない
 
-- **TensorBoard を採用 (wandb ではない)**
-  - 理由: 個人開発 + offline 訓練前提で wandb account 不要。M6.1 で必要なら wandb は SummaryWriter の wrapper で追加可能
+- **TensorBoard を採用 (wandb ではない、ただし M5.1 で前倒し再評価)**
+  - 理由: 個人開発 + offline 訓練前提で wandb account 不要
+  - **【再評価トリガー前倒し】**: 旧案では M6.1 で再評価だったが、複数 ablation 比較が **M5 から発生想定** のため **M5.1 phase review で wandb 採用判断**
+  - 実装は SummaryWriter の wrapper として追加可能 (`wandb.tensorboard.patch(...)` で既存コード変更最小)
 
 - **`--amp` は bf16 のみ (fp16 不採用)**
   - 理由: T-M1.5 §6.1 で sinusoidal embedding の小さい値が fp16 で underflow するリスクが指摘済。hinge GAN の `relu(1-D)` も同じく underflow リスクで本チケットで再確認
+
+- **`accelerate` 不採用判断を M6 DDP 時に必ず再評価 (固定)**:
+  - 現状「必要なら別 PR」が緩い表現 → **M6.1 着手前のレビュー必須項目** として固定
+  - 判断軸: DDP / FSDP / multi-node を素 PyTorch で書くコストと `accelerate.prepare(...)` の resume 互換性検証コストの比較
 
 #### Deprecated (旧案、却下根拠)
 
@@ -732,17 +884,25 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
 - **`InverseLR` の `warmup` を **linear warmup** (`min(1.0, step / warmup_steps)`) に置換**: 採用しない (WaveFit-PT 原実装が exponential warmup の `0.999^step` 系列のため、原典準拠)
 - **Validation を別 process で並列実行**: 採用しない (M2 では 10k step に 1 回で同期実行で十分、M6 で時間が問題になったら別 process 化)
 - **Mixed precision を per-loss 制御 (hinge GAN だけ fp32)**: 採用 (§6.1 通常項目「mixed precision」参照、autocast を generator/discriminator forward のみに限定)
+- **【検討追加】pydantic / dataclass-based config schema**:
+  - 現状の `yaml.safe_load` だけでは key typo (例: `mrstft_sc` vs `mr_stft_sc`) が **runtime まで検出されない**
+  - pre-commit `check-yaml` は YAML syntax のみで schema 不問
+  - **採用判断**: 現時点では未採用 (依存追加のコスト > メリット)、**再評価トリガー: M5.1 で config 変更頻発 / typo が原因の 1 epoch ロスが発生したら採用**
+  - 採用時は `pydantic.BaseModel` で `TrainConfig`, `LossWeightsConfig` 等の階層を定義、`load_config()` でバリデーション
 
 #### 再評価トリガー条件
 | 設計判断 | 再評価タイミング | 想定変更 |
 |---|---|---|
 | `pytorch-lightning` 不採用 | M6 完了時 | DDP / multi-node が必要になったら採用検討 |
-| TensorBoard 単独 | M6 完了時 | 複数実験の比較が wandb なしでつらかったら採用 |
+| TensorBoard 単独 (wandb 不採用) | **M5.1 phase review (前倒し)** | 複数 ablation 比較が M5 から発生想定 → wandb 採用 |
+| `accelerate` 不採用 | **M6.1 着手前 (必須レビュー、固定)** | DDP / FSDP のコスト比較 |
 | D 1:1 更新 | M5 / M6 中 | D loss が極小化し G が学習しない場合 1:2 化 |
 | fp16 不採用 | M6 完了時 | bf16 が GPU で使えない (古い GPU) 場合 fp16 + loss scaling を検討 |
 | Loss weight 固定 | M6 ablation 時 | weight 微調整で品質が上がる場合 |
 | Validation 同期実行 | M6 完了時 | 10k step の停止時間が問題になったら別 process 化 |
 | `InverseLR` exponential warmup | M5 phase review | linear warmup でも同等品質なら簡易な方を採用 |
+| pydantic / dataclass config schema | M5.1 (config 変更頻発時) | typo 由来の 1 epoch ロスが発生したら採用 |
+| `utils/training_loop.py` 共通化 | **M2.6 smoke pass 直後 (M3.2 着手前必須)** | `save_checkpoint` / `iter_forever` / `log_scalars` / `run_validation` を切り出し |
 
 ### 8.2 思想 / 哲学の見直し
 
@@ -756,6 +916,13 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
   - **`main()` を click CLI vs argparse**: click を採用 (Python ecosystem 慣例、`pyproject.toml` `[project.scripts]` で entry point 化が容易)
   - **TrainState dataclass の公開**: 公開する (`from wavenext2.train.train_gan import TrainState` で resume の確認テストから参照可能)
   - **`save_checkpoint` / `load_checkpoint` を `utils/checkpoint.py` に分離**: M3.2 で再利用するなら分離、本チケットでは `train_gan.py` 内 private 関数で十分 (Diff 側で必要になった時に refactor)
+
+- **【新原則】「training_step 関数」と「main loop」の分離**:
+  - 「1 step backward 動作 (`train_gan_step`)」と「loop / checkpoint / validation の管制 (`main`)」を **完全分離**
+  - 利点 1: テストは `train_gan_step` 単体で 1 step 検証可能 (`main()` 全体を呼ぶ必要なし、CI 高速化)
+  - 利点 2: 後で Lightning に移行する場合も `train_gan_step` を `LightningModule.training_step` に移すだけで済む
+  - 利点 3: T-M3.2 で `train_diff_step` を同 signature にして `tests/conftest.py` の fixture 共用可能
+  - この原則は M3.2 / 後続全ての訓練スクリプトで踏襲
 
 #### M1 phase review で確立した原則の適用
 
@@ -778,19 +945,18 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
 ### 9.1 後続チケットに渡す情報
 
 #### T-M2.6 (1000 step overfitting test) へ
-- **使用方法**:
+- **使用方法 (推奨)**:
   ```python
   # tests/integration/test_overfit_1000step.py
-  import subprocess
-  result = subprocess.run([
-      "uv", "run", "python", "-m", "wavenext2.train.train_gan",
-      "--config", "configs/test_overfit.yaml",  # 1 utterance 専用 config
-      # --debug は使わない (1000 step まで回す)
-  ], capture_output=True, timeout=600)
-  assert result.returncode == 0
-  # その後 TensorBoard ログを inspect で読み出して loss 降下を確認
+  from wavenext2.train.train_gan import train_gan_step
+  # `train_gan_step` を import して 1000 回呼ぶ薄い loop で実装
+  for step in range(1000):
+      logs = train_gan_step(G, D, opt_G, opt_D, sch_G, sch_D,
+                            mel_overfit, audio_overfit, cfg,
+                            crit_gan, crit_fm, crit_mrstft)
   ```
 - **重要事項**:
+  - **`scripts/smoke_gan.py` は `train_gan_step` を import する薄い wrapper にする** (§8.1 採用昇格)
   - 1 utterance を `train_loader` から繰り返し読む `OverfitDataset` を T-M2.6 で別途実装 (本チケットでは扱わない)
   - 1000 step 完了で `loss_g_mrstft_sc + loss_g_mrstft_mag` が **初期値の 10%** 以下になることを期待 (milestones.md §M2.6)
   - 本チケットで実装した `--debug` フラグは 1 step だけのため T-M2.6 では使わない
@@ -825,11 +991,32 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
   - `checkpoint.keep_last_n=5` で rolling delete を有効化、`best.pt` のみ常時保持
 
 #### T-M3.2 (Diff 訓練スクリプト) へ
-- **共通モジュール**:
-  - `wavenext2.utils.scheduler.InverseLR` は Diff では使わない (固定 lr) が、`save_checkpoint` / `load_checkpoint` / `iter_forever` / `log_scalars` / `run_validation` の **API パターン** は再利用可能
-  - 本チケット完了後、M3.2 側で必要なら `utils/training_loop.py` への generic refactor を検討 (本チケットでは GAN 専用で十分)
+- **共通モジュール (M3.2 着手前必須 refactor)**:
+  - `wavenext2.utils.scheduler.InverseLR` は Diff では使わない (固定 lr) が、`save_checkpoint` / `load_checkpoint` / `iter_forever` / `log_scalars` / `run_validation` を **M2.6 smoke pass 直後に `utils/training_loop.py` に切り出す** (§8.1 採用昇格、M3.2 着手前必須)
+  - **`train_diff_step(model, opt, sch, mel, audio, cfg) -> dict[str, float]` を同 signature で実装**: `tests/conftest.py` の fixture (G, D, opt, sch, crit) を GAN / Diff で共用可能、テスト時間短縮
+  - 旧 §6.3 「本チケットでは GAN 専用実装で十分、refactor は T-M3.2 の §8 で再検討」は撤回
 - **`TrainState` dataclass**: Diff 側でも `step` / `best_val_*` / `rng_state` を持つ同等の dataclass を作る (共通化はしない、Diff metric が違うため)
 - **TensorBoard scalar 命名規約**: `loss_G`, `loss_D`, `loss_g_*`, `lr_*` は本チケットで確立。Diff 側は `loss`, `lr` の simple naming で良い (sub-model index を tag suffix)
+
+#### T-M0.2 申し送り (CI 整備)
+- **`.github/workflows/test.yml` で `pytest -n auto` 並列化**: M2 全体 unit test 110s 超過 → 並列化必須
+- `pytest-xdist` の依存追加を `pyproject.toml` の `[dependency-groups.dev]` に明示
+- GPU テスト (`@pytest.mark.gpu`) は別 job で run、CPU テストのみ並列化
+
+#### T-M2.1 から受領
+- `worker_init_fn` テンプレ snippet (`epoch * num_workers + worker_id` seed、§6.1 通常項目「`iter_forever` + `persistent_workers=True`」参照)
+- `Batch` dataclass (`{"mel": Tensor, "audio": Tensor}` の代わりに dataclass 化されていれば import して使用)
+- `prefetch_factor` 明示 (default=2 のため `DataLoader(..., prefetch_factor=2)` を config 経由で明示)
+
+#### T-M2.3 から受領
+- `compute_total_loss` の戻り値が `(total: Tensor, unweighted_dict: dict[str, Tensor])` tuple
+- `losses_unweighted` を **TensorBoard log 強制** (weighted のみだと loss weight 変更時に履歴が比較不可)
+- 上記 `train_gan_step` 擬似コードで `mrstft_unweighted` を dict として受け取り、return dict に `_unweighted` suffix で含めて TensorBoard log
+
+#### T-M2.4 から受領
+- `return_intermediates=True` で T 個の中間 `y_t` を返す signature (M2.6 で中間 loss curve 観察に使用、本チケットでは未使用だが将来 hook 用に config に keep)
+- `best.pt` の **atomic rename** (`best.pt.tmp` → `os.replace(best.pt.tmp, best.pt)`)、`test_atomic_best_pt_rename` で検証
+- `audio_length=None` で自動推定 (`mel.shape[-1] * hop`) → `train_gan_step` 内で `audio_length=audio.shape[-1]` を明示渡し
 
 #### 共通の注意事項
 - **EMA 関連 code を一切残さない**: `docs/open-questions.md` 確定の通り、Vocos / WaveFit-PT 共に EMA 未使用。本チケットでも EMA を 1 行も書かない (TODO コメント含めて)

@@ -30,7 +30,7 @@ GAN-WaveNeXt 2 の訓練ループで Generator / Discriminator の最適化に�
 - `FeatureMatchingLoss` (`feature_matching.py`): MSD ×3 の中間特徴 L1 距離平均
 - `MultiResolutionSTFTLoss` (`stft_loss.py`): 3 解像度 STFT の Spectral Convergence + Magnitude L1
 
-これにより T-M2.5 (train_gan) は 4 つの loss を `compute_total_loss(losses, weights)` で集約して optimizer に渡すだけで済む。Diff 側 (T-M3.2) は MSELoss のみを使うため本チケットを参照しない。
+これにより T-M2.5 (train_gan) は 4 つの loss を `compute_total_loss(losses, weights) -> tuple[Tensor, dict[str, float]]` で集約し、total + per-component unweighted scalar を取得して optimizer に渡すだけで済む (weighted/unweighted 両方を TensorBoard ログするために tuple 戻り値とする — §8.1 採用昇格)。Diff 側 (T-M3.2) は MSELoss のみを使うため本チケットを参照しない。
 
 ### ゴール
 完了したと判断できる具体的な状態 (`docs/milestones.md` §M2.3 Acceptance を内包):
@@ -40,7 +40,8 @@ GAN-WaveNeXt 2 の訓練ループで Generator / Discriminator の最適化に�
 - [ ] HingeGAN: `D_loss = relu(1 - D(real)).mean() + relu(1 + D(fake)).mean()` / `G_loss = -D(fake).mean()` (`docs/milestones.md` §M2.3 Acceptance #1)
 - [ ] FM: 3 sub-D × 7 layer の全中間特徴の L1 距離を `num_features` で平均 (Acceptance #2)
 - [ ] MR-STFT: `n_ffts=[512,1024,2048]`, `win_lengths=[360,900,1800]`, `hop_sizes=[80,150,300]` の 3 解像度で SC + Mag L1 を平均、`eps=1e-5` (Acceptance #3)
-- [ ] 重み定数を `compute_total_loss(losses: dict, weights: dict) -> torch.Tensor` ヘルパで集約可能 (重み: d_gan=1.0, d_fm=10.0, mrstft_sc=2.5, mrstft_mag=2.5 — Acceptance #4)
+- [ ] 重み定数を `compute_total_loss(losses: dict, weights: dict) -> tuple[torch.Tensor, dict[str, float]]` ヘルパで集約可能。戻り値は `(total, unweighted_dict)` で、unweighted_dict は per-component scalar (`.item()` 済み) — TensorBoard で weighted/unweighted 両方ログするのが GAN デバッグで必須 (重み: d_gan=1.0, d_fm=10.0, mrstft_sc=2.5, mrstft_mag=2.5 — Acceptance #4)
+- [ ] `compute_total_loss` 内で `sorted(losses.keys())` で float 加算順序を固定 (bf16 学習で float 加算順序が再現性を破壊するため M6 で必須)
 - [ ] `requires_grad=True` 入力で各 loss が backward 可能、勾配方向の sanity check (`D(real)` を増やすと `D_loss` が減る) が pass
 - [ ] 数値範囲: 同入力で 0、異入力で正、NaN / Inf を含まない
 - [ ] `tests/test_adversarial.py`, `tests/test_feature_matching.py`, `tests/test_stft_loss.py` の全テスト pass
@@ -293,25 +294,42 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 def compute_total_loss(
     losses: dict[str, torch.Tensor],
     weights: dict[str, float] | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict[str, float]]:
     """Weighted sum of named loss tensors.
 
     Args:
         losses: {"d_gan": ..., "d_fm": ..., "mrstft_sc": ..., "mrstft_mag": ...}
         weights: None で DEFAULT_WEIGHTS を使用
     Returns:
-        scalar tensor: sum(weights[k] * losses[k] for k in losses)
+        (total, losses_unweighted):
+            total: scalar tensor = sum(weights[k] * losses[k] for k in sorted(losses))
+            losses_unweighted: {k: losses[k].detach().item() for k in sorted(losses)}
+                — TensorBoard で weighted (total) と unweighted (per-component) の
+                両方をログするための per-component scalar (§8.1 採用昇格)。
+
+    Notes:
+        - `sorted(losses.keys())` で float 加算順序を固定する (§8.1 採用昇格)。
+          dict iteration 順序は Python 3.7+ で挿入順保証されるが、
+          float の加算は非可換のため bf16 学習で再現性を破壊するリスクがあり、
+          M6 本格訓練では順序固定が必須。
+        - `losses_unweighted` 側は呼び出し側で TensorBoard logger に渡すだけで済むよう
+          `.item()` 済み Python float の dict として返す (Tensor のままだと graph 保持
+          で memory leak の懸念)。
     """
     weights = weights if weights is not None else DEFAULT_WEIGHTS
+    keys = sorted(losses.keys())  # 順序固定 (§8.1 採用昇格)
+    if not keys:
+        raise ValueError("losses dict is empty")
     total = None
-    for k, v in losses.items():
+    losses_unweighted: dict[str, float] = {}
+    for k in keys:
+        v = losses[k]
         if k not in weights:
             raise KeyError(f"loss key {k!r} has no corresponding weight in {list(weights)}")
+        losses_unweighted[k] = v.detach().item()
         contrib = weights[k] * v
         total = contrib if total is None else total + contrib
-    if total is None:
-        raise ValueError("losses dict is empty")
-    return total
+    return total, losses_unweighted
 ```
 
 ### 2.3 使用するハイパーパラメータ / 定数
@@ -360,10 +378,14 @@ def compute_total_loss(
 2. 3 resolution 平均で `(sc_mean, mag_mean)` を返す
 3. **2 成分を分けて返す**理由: 集約時の重み (`mrstft_sc=2.5`, `mrstft_mag=2.5`) を train_gan で個別に乗算できるため
 
-#### `compute_total_loss(losses, weights)`
+#### `compute_total_loss(losses, weights) -> tuple[Tensor, dict[str, float]]`
 1. `weights` が `None` なら `DEFAULT_WEIGHTS` を使用
-2. `total = sum(weights[k] * losses[k] for k in losses)`
-3. `losses` 内に `weights` にない key があれば `KeyError`
+2. `keys = sorted(losses.keys())` で **float 加算順序を固定** (§8.1 採用昇格、bf16 再現性)
+3. 各 `k in keys` に対して:
+   - `losses_unweighted[k] = losses[k].detach().item()` (TensorBoard 用 per-component scalar)
+   - `total += weights[k] * losses[k]`
+4. `losses` 内に `weights` にない key があれば `KeyError`、空 dict なら `ValueError`
+5. `return (total, losses_unweighted)`
 
 ### 2.5 設計上の重要決定
 
@@ -373,6 +395,8 @@ def compute_total_loss(
 - **`FeatureMatchingLoss` で `fr.detach()`**: 通常 G 更新時に real 側勾配は不要のため detach。仕様確認後に確定 (§6.1)
 - **`HingeGANLoss` は state を持たない pure Module**: `nn.Module` 継承だが parameters は 0 個 (`buffer` も持たない)
 - **`MultiResolutionSTFTLoss` の `window` は `register_buffer(persistent=False)`**: device 自動移動するが state_dict に保存しない (再構築可能、checkpoint サイズ削減)
+- **`MultiResolutionSTFTLoss` を M2 専用と決めつけない**: M3 でも Diff の post-filter fit (`docs/architecture.md` §6.5) や M4 評価 (`eval_metrics.py`) で再利用する可能性が高い。`losses/stft_loss.py` は GAN 専用ではなく汎用 MR-STFT モジュールとして設計し、M3 / M4 から `from wavenext2.losses.stft_loss import MultiResolutionSTFTLoss` で import 可能にする (§9.1 で T-M3.2 / T-M3.4 / T-M4 へ申し送り)
+- **MR-STFT eps=1e-5 と T-M1.3 log eps=1e-7 の使い分け根拠**: 両方とも `log(mag + eps)` 形式だが、T-M1.3 は **mel スペクトログラム** (slaney scale / norm で値が小さい、~1e-5 オーダ) に対する log floor、本チケットの MR-STFT は **linear magnitude STFT** (Hann window で値が大きめ、~1e-2〜10 オーダ) に対する log floor。数値範囲に対する eps の感度が違うため意図的に分離。eps を統一すると mel 側で過剰な log floor がかかり dynamic range が崩れる (mel 値 1e-5 オーダで eps=1e-5 だと log(2e-5) ≒ log(1e-5) に潰れる)。逆に MR-STFT 側を eps=1e-7 にすると STFT magnitude が 0 に近い周波数帯で `log(1e-7)` まで log が落ち込み勾配が爆発する。**T-M1.3 と本チケットで eps を統一しない**ことを §8.1 で明示
 
 ## 3. エージェントチームの役割と人数
 
@@ -442,7 +466,7 @@ def compute_total_loss(
 #### `tests/test_feature_matching.py`
 - [ ] `test_same_features_zero`: `feats_real == feats_fake` で loss = 0
 - [ ] `test_diff_features_positive`: ランダム異入力で loss > 0
-- [ ] `test_num_features_count`: 3 sub-D × 7 layer = **21 個** の場合の `num_features` 確認 (§6.1 で最終層除外 vs 含むを WaveFit-PT で確定)
+- [ ] `test_num_features_count`: 3 sub-D × 7 layer = **18 個** の場合の `num_features` 確認 (T-M2.2 から受領: `DiscriminatorOutput.features` は logits を含まない、§6.3 参照)
 - [ ] `test_l1_formula`: 単純 case (1 sub-D, 1 layer, scalar tensor) で `abs(a-b).mean()` と一致
 - [ ] `test_backward`: `requires_grad=True` 入力で backward 動作、`fake` 側に grad が流れる (`fr.detach()` で real 側に grad が **流れない**)
 - [ ] `test_shape_mismatch`: `feats_real` と `feats_fake` の長さ不一致で適切なエラー (silent failure なし)
@@ -457,12 +481,17 @@ def compute_total_loss(
 - [ ] `test_backward`: backward 動作、`y_pred.grad` が non-None
 - [ ] `test_window_buffer_device`: `model.to("cuda")` で `window` も CUDA に移動 (`register_buffer` 確認)
 - [ ] `test_persistent_false`: `model.state_dict()` に `window` が含まれない (`persistent=False` 確認)
+- [ ] `test_window_dtype_aware`: `model(x.bfloat16(), y.bfloat16())` で window が bf16 に再生成され runtime error が出ないことを確認 (§6.1 「resume 時 dtype 不整合」対策、`if self.window.dtype != x.dtype` 分岐の検証)
 
 #### 共通 / `compute_total_loss`
 - [ ] `tests/test_compute_total_loss::test_weighted_sum`: 既知の `losses` / `weights` で手計算と一致
 - [ ] `tests/test_compute_total_loss::test_default_weights`: `weights=None` で `DEFAULT_WEIGHTS` 適用
 - [ ] `tests/test_compute_total_loss::test_unknown_key_error`: `losses` に未登録 key で `KeyError`
 - [ ] `tests/test_compute_total_loss::test_empty_dict_error`: 空 dict で `ValueError`
+- [ ] `tests/test_compute_total_loss::test_return_tuple`: 戻り値が tuple `(total: Tensor, unweighted_dict: dict[str, float])` の 2 要素であることを `isinstance` で確認 (§8.1 採用昇格)
+- [ ] `tests/test_compute_total_loss::test_unweighted_dict_contents`: `unweighted_dict[k] == losses[k].item()` で **un-weighted scalar** が返ることを確認、`unweighted_dict["d_fm"]` が `losses["d_fm"].item()` と一致 (重み 10.0 を掛けていない)
+- [ ] `tests/test_compute_total_loss::test_unweighted_dict_is_python_float`: `isinstance(unweighted_dict[k], float)` で Tensor ではなく Python float が返ることを確認 (graph 保持による memory leak 防止)
+- [ ] `tests/test_compute_total_loss::test_order_independence`: 同じ `losses` dict を異なる insertion 順序 (`{"a":..., "b":...}` vs `{"b":..., "a":...}`) で渡しても `total` が **bit-exact 一致**することを確認 (`sorted(losses.keys())` による順序固定検証、§8.1 採用昇格)
 
 ### 5.2 e2e / 結合テスト
 
@@ -505,13 +534,10 @@ def compute_total_loss(
     3. 確認結果を T-M2.2 §9.1 に逆連絡 (本チケット → T-M2.2 への要求事項として明示)
   - **本確認が未解決のままだと hinge loss が無効化される (silent failure)**
 
-- **CRITICAL: FM の `num_features` の正確さ — 3 sub-D × 7 layer = 21 個 vs 最終層除外で 18 個**:
-  - WaveFit-PT / HiFi-GAN 慣例で最終 logit 層 (= Discriminator の output layer) を FM の対象から除外する場合がある
-  - **本チケット実装着手前の MUST DO**:
-    1. WaveFit-PT (`yukara-ikemiya/wavefit-pytorch/src/loss/discriminator.py` または `feat_match.py`) の実装を確認
-    2. HiFi-GAN (`jik876/hifi-gan/models.py::feature_loss`) の実装を確認 (通常は output を除く)
-    3. `num_features` を 18 (除外) / 21 (含む) のどちらにするか確定、テストの `test_num_features_count` を確定値で pin
-  - **連絡先**: T-M2.2 で Discriminator が返す `features` リストの順序・最終層含む/除く仕様と整合を取る
+- **RESOLVED (T-M2.2 phase review): FM の `num_features` = 18 個 (3 sub-D × 7 layer、logits 除外)**:
+  - T-M2.2 から受領 (`DiscriminatorOutput(logits, features)` NamedTuple): `features` には最終 logit を **含まない**
+  - 確定値: `num_features = 3 sub-D × 7 layer = 18` で `test_num_features_count` を pin
+  - WaveFit-PT / HiFi-GAN 慣例と一致 (最終 logit 層は FM 対象外、`feature_loss` 関数で除外)
 
 #### 通常項目
 
@@ -519,8 +545,14 @@ def compute_total_loss(
 - **MR-STFT の `torch.stft` window device**: `register_buffer("window", ..., persistent=False)` で `model.to(device)` で自動移動する設計。`register_buffer` ではなく `.to()` で個別移動する誤実装に注意
 - **MR-STFT の n_fft=2048 + signal 短い時の挙動**: signal 長 < n_fft の場合 `torch.stft` がデフォルトで center pad するが念のため `test_short_signal` で確認 (segment_length=16384 なら問題なし)
 - **`FeatureMatchingLoss` の `.detach()` 妥当性**: G 更新時に D の中間特徴に対する勾配を遮断するために `feats_real` 側は通常 detach する。WaveFit-PT 仕様確認後に確定 (§6.1 critical 項目 #2 と関連)
-- **重み (`d_fm=10.0`) の大きさ**: D-FM だけが他より 1 桁大きいのは WaveFit / HiFi-GAN 慣例。`compute_total_loss` で合算した時に FM が dominant にならないか、勾配 magnitude を TensorBoard で確認できるように `losses_unweighted` も別途返す API を T-M2.5 に伝達 (§9.1)
-- **`compute_total_loss` の集約順序**: dict iteration 順序は Python 3.7+ で保証されるが、float の加算は非可換ではないため数値再現性のため `sorted(losses.keys())` で順序固定する案あり (本チケットでは未採用、必要なら §9.1 で T-M2.5 へ伝達)
+- **重み (`d_fm=10.0`) と hinge G (`d_gan=1.0`) のスケール差 — FM gradient dominant リスク (強制要請)**: D-FM だけが他より 1 桁大きい (WaveFit / HiFi-GAN 慣例)。`compute_total_loss` で合算した時に **FM gradient が dominant** になり hinge G が学習しないリスクがある。これを早期検知するため、本チケットでは `compute_total_loss` の戻り値を `(total, losses_unweighted)` tuple とし、T-M2.5 が `losses_unweighted` を TensorBoard に **別途 log することを強制要請** とする (推奨ではなく、§9.1 で T-M2.5 への **インターフェース要請**)。これにより各 component の unweighted scalar と weighted contribution (`weights[k] * unweighted[k]`) を train ループ側で個別にプロットでき、`g_fm` が `g_gan` を一桁以上上回る現象を即座に検知可能
+- **`compute_total_loss` の集約順序 (採用昇格)**: dict iteration 順序は Python 3.7+ で挿入順保証されるが、float の加算は非可換のため bf16 学習で再現性を破壊するリスクがあり、M6 本格訓練 (A100, bf16) では必須化。本チケットで `sorted(losses.keys())` による順序固定を **採用昇格** (§8.1 採用設計)、テストで bit-exact 確認 (§5.1 `test_order_independence`)
+- **`MultiResolutionSTFTLoss.window` の `persistent=False` resume 時 dtype 不整合**: fp32 で学習した checkpoint を bf16 で resume する場合、`persistent=False` のため window が state_dict に保存されず、`__init__` 時の dtype (デフォルト fp32) で再生成される。`y_pred` が bf16 で `window` が fp32 だと `torch.stft` が **silent に型 promote**するか、**runtime error** になる (PyTorch version 依存)。**対策**: `_STFTLossSingleResolution.forward` の冒頭で dtype-aware に window を再生成する:
+  ```python
+  if self.window.dtype != x.dtype:
+      self.window = torch.hann_window(self.win_length, dtype=x.dtype, device=x.device)
+  ```
+  (`register_buffer` は dtype 固定なので、再代入は `self.window = ...` で OK。ただし register_buffer 経由のため `nn.Module.__setattr__` が適切に処理する。テストで `model(x.bfloat16())` → window が bf16 化することを確認)
 - **`HingeGANLoss` の sub-D 平均 vs 合計**: WaveFit-PT は **平均** (`/ len(d_real_list)`)、HiFi-GAN は **合計**。本チケットでは **平均** を採用 (WaveFit-PT 準拠)。代替候補として `reduce: Literal["mean", "sum"]` 引数化を §8.1 で議論
 - **`MultiResolutionSTFTLoss` の SC 分母**: `||mag_true||_F + eps` (本チケット採用) vs `(||mag_true||_F + eps)^2` などの実装バリアントあり。WaveFit-PT の `src/loss/mrstft.py` の **正確な式** を確認して pin
 - **`MR-STFT` の Mag 計算: log vs linear**: `docs/training.md` §2.4 で「log-amplitude」と明記されているため `log(mag + eps)` を採用。ParallelWaveGAN は linear、Vocos は log と異なるので注意
@@ -540,9 +572,10 @@ def compute_total_loss(
 ### 6.3 他チケットとの整合性
 
 - **T-M2.2 (Discriminator)** との整合:
-  - 期待 signature: `discriminator(audio) -> (d_outputs: list[Tensor(B,1,T_l)], features: list[list[Tensor]])`
-  - `d_outputs` は 3 sub-D の最終 logit、`features` は 3 sub-D × N layer の中間特徴
-  - **本チケットからの逆要求**: 最終層は活性化なし (`Linear` / `Conv1d`)、`features` リストに最終 logit を含むか除くかを WaveFit-PT 準拠で確定 (§6.1 critical #1, #2)
+  - 期待 signature: `discriminator(audio) -> DiscriminatorOutput(logits, features)` (T-M2.2 で確定済 NamedTuple、`docs/tickets/T-M2.2-discriminator.md` 参照)
+  - `logits` は 3 sub-D の最終 logit リスト、`features` は 3 sub-D × N layer の中間特徴リスト
+  - **T-M2.2 から受領 (確定事項)**: `num_features` は **logits を含まない** (= 各 sub-D 7 layer × 3 sub-D = **18 個**)。本チケットの `test_num_features_count` を **18** で pin (§6.1 critical #2 は T-M2.2 側で解決済み)
+  - **本チケットからの逆要求 (残)**: 最終層は活性化なし (`Linear` / `Conv1d`) であること (§6.1 critical #1)
   - 不整合があった場合は T-M2.2 側を修正
 - **T-M2.4 (GANWaveNext2)** との整合:
   - 本チケットは fake 側 generator 出力 `y_0` を取り、Discriminator に通した結果を loss に渡す経路は T-M2.4 / T-M2.5 が責務
@@ -560,10 +593,11 @@ def compute_total_loss(
     g_gan  = hinge.g_loss(d_outputs_fake_for_g)
     g_fm   = fm(feats_real, feats_fake_for_g)
     sc, mag = mrstft(y_0, x_gt)
-    g_total = compute_total_loss(
+    g_total, losses_unweighted = compute_total_loss(
         {"d_gan": g_gan, "d_fm": g_fm, "mrstft_sc": sc, "mrstft_mag": mag},
         weights=cfg.loss.weights,
     )
+    # losses_unweighted は T-M2.5 で TensorBoard に別途 log すること (強制要請、§9.1)
     ```
 - **T-M3.2 (train_diff)** との整合:
   - **本チケットは Diff 側で不使用**。T-M3.2 は `torch.nn.functional.mse_loss(eps_pred, eps_gt)` のみ
@@ -607,6 +641,15 @@ def compute_total_loss(
 
 - **MR-STFT が `(sc, mag)` の 2 戻り値**:
   - 理由: train 側で重みを別々に乗じる (`mrstft_sc=2.5`, `mrstft_mag=2.5`)、TensorBoard に別系列でログする
+
+- **`compute_total_loss(losses, weights) -> tuple[Tensor, dict[str, float]]` (採用昇格)**:
+  - 旧案: `compute_total_loss(losses, weights) -> Tensor` 単一戻り値
+  - **採用昇格根拠**: GAN デバッグでは weighted total と unweighted per-component の **両方** を TensorBoard ログするのが必須 (D-FM が dominant になっていないか・hinge G が学習しているか・MR-STFT が train loss を引っ張っていないかを別系列で確認するため)。M2 phase review で、T-M2.5 が `losses_unweighted` を別途集めて TensorBoard log するインターフェースを強制要請とする決定に伴い、`compute_total_loss` 側で per-component scalar dict を返す責務を負う設計に昇格
+  - per-component は `.item()` 済み Python float で返す: Tensor のまま返すと train ループ側で参照保持されて backward graph が解放されない memory leak の懸念
+
+- **`compute_total_loss` 内で `sorted(losses.keys())` で float 加算順序を固定 (採用昇格)**:
+  - 旧案: dict iteration 順序 (Python 3.7+ 挿入順保証) に任せる
+  - **採用昇格根拠**: M6 本格訓練は A100 bf16 mixed precision で行うが、bf16 は仮数部 7-bit のため float の加算順序が異なると `total` の bit 値が変わり、checkpoint resume / multi-seed 比較で再現性が破壊される。`sorted(losses.keys())` で alphabetical 順 (= `d_fm, d_gan, mrstft_mag, mrstft_sc`) に固定すれば dict insertion 順に依存せず bit-exact 一致が保証される。テストで bit-exact 確認 (§5.1 `test_order_independence`)
 
 #### Deprecated (旧案、却下根拠)
 
@@ -666,6 +709,15 @@ def compute_total_loss(
     - **メリット**: 重みを `nn.Parameter` 化して学習可能にできる
     - **却下根拠**: M2 段階では固定重みで十分、過剰な抽象化
     - **再評価トリガー**: M6.3 で重み調整 ablation が必要なら検討
+
+13. **MR-STFT eps を T-M1.3 (mel log floor) と統一する**:
+    - **メリット**: eps が 1 箇所で管理できて見通しが良い、`from wavenext2.constants import LOG_EPS` で一元化可能
+    - **却下根拠**: 本チケットの MR-STFT eps=1e-5 と T-M1.3 mel log eps=1e-7 は **数値範囲に対する eps の感度が違うため意図的に分離** している。
+      - **T-M1.3 (mel)**: slaney scale + norm により mel 値は ~1e-5 オーダ。eps=1e-7 は値の 1% 以下で dynamic range を潰さない。
+      - **本チケット (MR-STFT)**: linear magnitude STFT (Hann window) は ~1e-2〜10 オーダ。eps=1e-5 は値の 0.1% 以下で同様に dynamic range を保持。
+      - eps を 1e-7 に統一すると MR-STFT 側で magnitude が 0 に近い周波数帯 (高周波や無音区間) で `log(1e-7) ≈ -16.1` まで log が落ち込み、勾配が爆発する。
+      - 逆に eps を 1e-5 に統一すると mel 側で `log(2e-5) ≈ log(1e-5)` に潰れ dynamic range が崩れる (mel 値 ~1e-5 オーダで eps=1e-5 だと log floor が信号と同オーダになる)。
+    - **再評価トリガー**: M1.3 phase review で mel 値のオーダが変わった (slaney → htk 等の scale 変更) 場合、本チケット eps も再検討
 
 #### 再評価トリガー条件
 
@@ -746,15 +798,44 @@ def compute_total_loss(
   loss_g = compute_total_loss(losses, weights=cfg.loss.weights or DEFAULT_WEIGHTS)
   loss_g.backward(); opt_G.step()
   ```
-- **重要事項**:
+- **重要事項 (T-M2.5 への強制要請 / インターフェース要件)**:
+  - **`compute_total_loss` 戻り値は tuple `(total, losses_unweighted)`** (§8.1 採用昇格): 旧 `Tensor` 単一戻り値ではないことに注意。受け取り側は必ず 2 値で unpack すること:
+    ```python
+    g_total, losses_unweighted = compute_total_loss(losses, weights)
+    ```
+    1 値で受けると `tuple` が `g_total` に代入されて `g_total.backward()` が失敗する。
+  - **`losses_unweighted` を TensorBoard で別途 log する (強制要請、推奨ではない)**: D-FM (weight=10.0) と hinge G (weight=1.0) の **スケール差** により FM gradient が dominant になり hinge G が学習しないリスクがある (§6.1 「FM weight=10.0 と hinge G weight=1.0 のスケール差」)。T-M2.5 は以下を必ず log:
+    ```python
+    # weighted total
+    writer.add_scalar("loss/g_total", g_total.item(), step)
+    # unweighted per-component (FM dominant 検知のため)
+    for k, v in losses_unweighted.items():
+        writer.add_scalar(f"loss/unweighted/{k}", v, step)
+    # weighted contribution (バランス確認のため)
+    for k, v in losses_unweighted.items():
+        writer.add_scalar(f"loss/weighted/{k}", weights[k] * v, step)
+    ```
+    本要請は M2.5 ticket の Acceptance に明記すること。
   - **`DEFAULT_WEIGHTS`** で `mel_mae` key は **未登録**。M6.3 ablation で Mel-MAE 追加するなら本チケットの `DEFAULT_WEIGHTS` を拡張
-  - **TensorBoard ログ**: 個別 loss (`g_gan`, `g_fm`, `mrstft_sc`, `mrstft_mag`) と total (`loss_g`) の両方を記録するよう推奨
-  - **`losses` dict iteration 順序**: Python 3.7+ で挿入順保証されるが、float 加算の数値再現性のため `compute_total_loss` 内で `sorted(losses.keys())` で明示的に固定する案あり (§6.1 通常項目参照)
-  - **`mrstft.to(device)` 必須**: `register_buffer("window")` は `to()` で移動するため、optimizer 起動前に device 移動を済ませる
+  - **`losses` dict iteration 順序は `compute_total_loss` 内で `sorted` 固定済** (§8.1 採用昇格): T-M2.5 側で順序を意識する必要なし。M6 bf16 学習でも bit-exact 再現性が保証される
+  - **`mrstft.to(device)` 必須**: `register_buffer("window")` は `to()` で移動するため、optimizer 起動前に device 移動を済ませる。さらに **fp32 checkpoint → bf16 resume 時の dtype 不整合** に注意 (§6.1 通常項目)、本チケット側で dtype-aware window 再生成を実装済
 
 #### T-M3.2 (train_diff) へ
-- **本チケットは使わない**。Diff 側は `torch.nn.functional.mse_loss(eps_pred, eps_gt)` のみ
-- 本チケットの 3 loss クラスを誤って import しないこと
+- **訓練の主 loss としては使わない**。Diff 側の主 loss は `torch.nn.functional.mse_loss(eps_pred, eps_gt)` のみ
+- **ただし `MultiResolutionSTFTLoss` は post-filter fit / validation metric として再利用可能**:
+  - `docs/architecture.md` §6.5 の post-filter fitting で MR-STFT を eval metric として使う場合は本チケットの `MultiResolutionSTFTLoss` を再利用
+  - `from wavenext2.losses.stft_loss import MultiResolutionSTFTLoss` で import (`losses/__init__.py` 経由でも可)
+  - 本チケットでは `losses/stft_loss.py` を **GAN 専用と決めつけない汎用 MR-STFT モジュール** として設計済 (§2.5)
+- `HingeGANLoss` / `FeatureMatchingLoss` は Diff 側で使わないため誤って import しないこと
+
+#### T-M3.4 (Diff post-filter) へ
+- **`MultiResolutionSTFTLoss` 再利用パス**: Diff の post-filter は GT vs Diff 出力の MR-STFT を closed-form で fit する (`docs/architecture.md` §6.5)。本チケットの `MultiResolutionSTFTLoss(n_ffts=[512,1024,2048], win_lengths=[360,900,1800], hop_sizes=[80,150,300], eps=1e-5)` をそのまま `from wavenext2.losses.stft_loss import MultiResolutionSTFTLoss` で import して使用可能
+- post-filter は Diff の hop_size=256 で動作するが、MR-STFT 自体の解像度設定は GAN と共通 (post-filter 出力の評価用のため、`hop_sizes` を Diff hop に揃える必要はない)
+
+#### T-M4 (evaluation infra) へ
+- **`MultiResolutionSTFTLoss` 再利用パス**: M4 の評価メトリクス (MCD, log F0 RMSE, UTMOS, NISQA) に加えて MR-STFT 値を auxiliary metric として log するなら、本チケットの `MultiResolutionSTFTLoss` をそのまま `eval_metrics.py` で再利用可能
+- `from wavenext2.losses.stft_loss import MultiResolutionSTFTLoss` で import
+- 本チケットでは `losses/stft_loss.py` を M2 専用と決めつけない汎用モジュールとして設計済 (§2.5)、M4 で evaluator が独自に再実装する必要はない
 
 #### 共通の注意事項
 - **数値再現性**: `register_buffer("window", persistent=False)` のため checkpoint resume 時に window が自動再生成。state_dict mismatch が出たら `persistent=True` 化を検討 (§8.1 再評価トリガー)
