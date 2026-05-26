@@ -3,11 +3,11 @@ id: T-M1.2
 title: STFT module (波形 → STFT-spec 2F-2 ch 変換)
 milestone: M1
 phase: M1
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.1, T-M0.2]
 blocks: [T-M1.6]
 related_docs:
@@ -28,8 +28,8 @@ WaveNeXt 2 統一フレームワークの **要** である **STFT module** を�
 ### ゴール
 完了したと判断できる具体的な状態:
 - [ ] `src/wavenext2/models/stft.py` に `STFTModule(nn.Module)` クラスが実装され、`from wavenext2.models.stft import STFTModule` で import 可能
-- [ ] GAN 設定 (`n_fft=2048, hop=300, win=1200`) で入力 `(B, T_mel*hop)` から `(B, 2046, T_mel)` を返す
-- [ ] Diff 設定 (`n_fft=1024, hop=256, win=1024`) で入力 `(B, T_mel*hop)` から `(B, 1022, T_mel)` を返す
+- [x] GAN 設定 (`n_fft=2048, hop=300, win=1200`) で入力 `(B, T_mel*hop)` から `(B, 2048, T_mel)` を返す (**2F-2 = n_fft = 2048**。当初記載の 2046 は誤記)
+- [x] Diff 設定 (`n_fft=1024, hop=256, win=1024`) で入力 `(B, T_mel*hop)` から `(B, 1024, T_mel)` を返す (**1024**、当初記載の 1022 は誤記)
 - [ ] DC/Nyquist 虚部 (常に 0) が削除されている (虚部の最初/最後 bin が落ちている)
 - [ ] 時間軸 truncation により出力の `T` 次元が引数 `T_mel` と **完全一致**
 - [ ] `tests/test_stft_module.py` の全テストが pass (`uv run pytest tests/test_stft_module.py -v`)
@@ -128,7 +128,7 @@ class STFTModule(nn.Module):
 | `normalized` | False | False | docs/architecture.md §3 |
 | `onesided` | True | True | docs/architecture.md §3 |
 | `return_complex` | True | True | PyTorch 推奨 API (実数 stack は deprecated) |
-| 出力 ch (2F-2) | 2046 | 1022 | docs/architecture.md §3 |
+| 出力 ch (2F-2 = n_fft) | 2048 | 1024 | docs/architecture.md §3 (当初表記 2046/1022 は誤記) |
 
 ### 2.4 アルゴリズム / 処理フロー
 
@@ -223,12 +223,12 @@ class STFTModule(nn.Module):
 ### 5.2 e2e / 結合テスト
 - [ ] **本チケット内 e2e**: 後続チケット T-M1.6 で sub-model に組み込むため、本チケットでは結合テストなし。代わりに `tests/test_stft_module.py::test_concat_compatibility` を 1 つ追加し、mel-spec ダミー (B, 128, T_mel) と STFT-spec を `torch.cat([mel, stft_spec], dim=1)` した結果が `(B, 128 + 2F-2, T_mel)` になることを確認 (T-M1.6 への前哨)
 
-### 5.3 Acceptance criteria (`docs/milestones.md` §M1.2 より転記)
-- [ ] GAN 設定 (n_fft=2048, win=1200, hop=300): 入力 `(B, T_mel*300)` → 出力 `(B, 2046, T_mel)`
-- [ ] Diff 設定 (n_fft=1024, win=1024, hop=256): 入力 `(B, T_mel*256)` → 出力 `(B, 1022, T_mel)`
-- [ ] 時間長 truncation 後の T 次元が指定 T_mel と完全一致
-- [ ] 実部・虚部の DC/Nyquist 扱いが正しい (虚部の最初/最後 bin が削除されている)
-- [ ] 単純な正弦波で round-trip テスト: STFT → 期待される周波数 bin にエネルギー集中
+### 5.3 Acceptance criteria (`docs/milestones.md` §M1.2 より転記、2026-05-27 完了)
+- [x] GAN 設定 (n_fft=2048, win=1200, hop=300): 入力 `(B, T_mel*300)` → 出力 `(B, 2048, T_mel)`
+- [x] Diff 設定 (n_fft=1024, win=1024, hop=256): 入力 `(B, T_mel*256)` → 出力 `(B, 1024, T_mel)`
+- [x] 時間長 truncation 後の T 次元が指定 T_mel と完全一致
+- [x] 実部・虚部の DC/Nyquist 扱いが正しい (虚部の最初/最後 bin が削除されている)
+- [x] 単純な正弦波で round-trip テスト: 複素 magnitude が 440Hz bin (38±1) にエネルギー集中
 
 ## 6. 懸念事項
 
@@ -321,9 +321,21 @@ class STFTModule(nn.Module):
 - **factory パターン全モジュール一貫化 (M1 phase review の横断テーマ)**: M1 の各モジュール (`STFTModule`, `MelExtractor`, `ConvNeXtBlock`, `NoiseEmbedding`, `Generator`, `SubModel`) は **全て `from_config(cls, cfg)` classmethod を持つ** ことを M1 完了時の暗黙契約として確立する。本チケットでは命名と引数規約 (`cfg: dict | DictConfig`、`cfg.<field_name>` で個別 hyperparam を引く) を予約し、実装は T-M1.3 の確定タイミング (`build_log_mel_from_config` 名前確定) に合わせて本チケットへ戻る。これにより T-M2.5 / T-M3.2 の `configs/{gan,diff}_wavenext2.yaml` 読み込みコードが `STFTModule.from_config(cfg.stft)` のような一行で書け、可読性 / 保守性が大きく上がる
 - **再評価トリガー条件**: §8.1 末尾の表を参照
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `STFTModule` 実装、`tests/test_stft_module.py` 21 件 pass (CPU/GPU)。学習パラメータ 0。forward 引数は ruff N803 回避で `t_mel` (小文字)。
+- **出力 ch は 2F-2 = n_fft** (GAN 2048 / Diff 1024)。`input_channels = 128 + n_fft` = GAN 2176 / Diff 1152 で architecture.md §3 表と一致。
+
+想定外と対処:
+1. **チケットの「2046/1022」は誤記**: `2F-2 = (n_fft//2+1) + (n_fft//2-1) = n_fft` なので 2048/1024 が正。architecture.md §3 の input_channels 2176/1152 と self-consistent。チケット §1/§2.3/§5.3 を修正。教訓: **派生値 (2F-2) は元値 (n_fft, input_channels) との算術整合で必ず検算する**。
+2. **round-trip テストは real 部のみだと位相平均でピークが ±2 bin ずれる**: 複素 magnitude (real + 復元した imag) で評価する版に変更し bin 38±1 に収束。教訓: **STFT real/imag を分離した表現でエネルギー集中を見るなら magnitude を復元する**。
+3. **短すぎる音声 (T_audio < n_fft) は torch.stft 自体が pad エラー**: 自前の「frame 不足」RuntimeError に届かない。テストは stft が走る長さ (3000) で frame 不足を起こす形に修正。
+4. **dynamic range mismatch (§6.1 critical) を実測**: 440Hz 正弦波で `stft_spec.std()/log_mel.std() = 3.28×` (`tests/snapshots/stft_mel_scale_ratio.json`)。**100× のような壊滅的乖離ではなく中程度**。→ T-M1.6 で STFT-spec への LayerNorm は「選択肢として保持するが必須ではない」と判断 (§9.1 申し送り更新)。
+
+次の似たタスクで応用できる教訓:
+- 派生チャネル数は「元のハイパーパラメータ + 全体 input_channels」と三方向で検算するとドキュメント誤記を即検出できる。
+- 信号処理テストは位相非依存な量 (magnitude / energy) で書くと脆さが減る。
 
 ## 9. 後続タスクへの連絡事項
 

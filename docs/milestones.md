@@ -166,12 +166,12 @@ class STFTModule(nn.Module):
         ...
 ```
 
-**Acceptance** (`tests/test_stft_module.py`):
-- [ ] GAN 設定 (n_fft=2048, win=1200, hop=300): 入力 `(B, T_mel*300)` → 出力 `(B, 2046, T_mel)`
-- [ ] Diff 設定 (n_fft=1024, win=1024, hop=256): 入力 `(B, T_mel*256)` → 出力 `(B, 1022, T_mel)`
-- [ ] 時間長 truncation 後の T 次元が指定 T_mel と完全一致
-- [ ] 実部・虚部の DC/Nyquist 扱いが正しい (虚部の最初/最後 bin が削除されている)
-- [ ] 単純な正弦波で round-trip テスト: STFT → 期待される周波数 bin にエネルギー集中
+**Acceptance** (`tests/test_stft_module.py`、2026-05-27 完了、21 件 pass):
+- [x] GAN 設定 (n_fft=2048, win=1200, hop=300): 入力 `(B, T_mel*300)` → 出力 `(B, 2048, T_mel)` (2F-2=n_fft)
+- [x] Diff 設定 (n_fft=1024, win=1024, hop=256): 入力 `(B, T_mel*256)` → 出力 `(B, 1024, T_mel)`
+- [x] 時間長 truncation 後の T 次元が指定 T_mel と完全一致
+- [x] 実部・虚部の DC/Nyquist 扱いが正しい (虚部の最初/最後 bin が削除されている)
+- [x] 単純な正弦波で round-trip テスト: 複素 magnitude が 440Hz bin (38±1) に集中
 
 ### M1.3 Mel-spectrogram 抽出 (`src/wavenext2/data/mel.py`)
 **チケット**: [T-M1.3](tickets/T-M1.3-mel-spectrogram.md)
