@@ -10,15 +10,17 @@
 
 | マイルストーン | チケット数 | pending | in_progress | in_review | completed | フェーズレビュー |
 |---|---|---|---|---|---|---|
-| M0 | 3 | 3 | 0 | 0 | 0 | 未実施 |
-| M1 | 6 | 6 | 0 | 0 | 0 | 未実施 |
-| M2 | 6 | 6 | 0 | 0 | 0 | 未実施 |
-| M3 | 5 | 5 | 0 | 0 | 0 | 未実施 |
-| M4 | 3 | 3 | 0 | 0 | 0 | 未実施 |
-| M5 | 2 | 2 | 0 | 0 | 0 | 未実施 |
-| M6 | 3 | 3 | 0 | 0 | 0 | 未実施 |
-| M7 | 1 | 1 | 0 | 0 | 0 | 未実施 |
-| **計** | **29** | **29** | **0** | **0** | **0** | — |
+| M0 | 3 | 3 | 0 | 0 | 0 | ✅ 2026-05-26 |
+| M1 | 6 | 6 | 0 | 0 | 0 | ✅ 2026-05-26 |
+| M2 | 6 | 6 | 0 | 0 | 0 | ✅ 2026-05-26 |
+| M3 | 5 | 5 | 0 | 0 | 0 | ✅ 2026-05-26 |
+| M4 | 3 | 3 | 0 | 0 | 0 | ✅ 2026-05-26 |
+| M5 | 2 | 2 | 0 | 0 | 0 | ✅ 2026-05-26 |
+| M6 | 3 | 3 | 0 | 0 | 0 | ✅ 2026-05-27 |
+| M7 | 1 | 1 | 0 | 0 | 0 | ✅ 2026-05-27 |
+| **計** | **29** | **29** | **0** | **0** | **0** | 全 8 フェーズ完了 |
+
+> **チケット作成ステータス**: 全 29 チケットが作成済み + フェーズレビュー (architect / ML / DevOps の 3 視点) 完了。`status` 列の `pending` は **実装着手前** を意味し、チケット文書自体は完成している。
 
 > **注**: チケット数が milestones.md のサブタスク総数 (28) と +1 ずれる場合があるのは、`M0` を `M0.1 / M0.2 / M0.3` の 3 チケットに分割しているため、または将来サブタスクが追加されたためです。最新は下表で確認。
 
@@ -104,4 +106,4 @@
 | M4 | — | 2026-05-26 | **統一 eval facade `eval/runner.py::evaluate()` を T-M4.1 に新設** (3 指標を 1 entry point、`EvalResult` + `eval_results/*.json` 永続化)、3 チケット戻り値 schema 統一 (`{metric}_mean/std`, `n`, `n_skipped`)、T-M4.1 相対比較主軸 + pymcd `adv_dtw` mode、T-M4.2 speechmos default + fairseq opt-in 降格 + GT UTMOS≥3.8 緩和、T-M4.3 CUDA events 測定 + two-tier CI + thread 復元。**cross-ticket: GAN 側 `synthesize(mel)` alias が T-M2.4 に必要 (T-M4.3 §9 申し送り、実装時に対応)** |
 | M5 | — | 2026-05-26 | **gate を品質でなく divergence gate に** (1 epoch=33k step では未達定常、loss 方向条件 + finite + NaN なしで判定)、`EvalResult.gate_passed` 二層構造 (自動 + 聴感人間)、共通 `run_smoke.py --mode {gan,diff}` orchestrator、**gate 判定者 = user GO/NO-GO** (M6 課金前)、resume 完全性 (optim/sched/step/RNG)、T-M5.2 **mock reverse では β 負値検出に不十分 → sub-model 1 を加え実 eps_pred で 2-step reverse**、cos<0.5 期待値 (0.99 は最低線)、bf16 fp32 強制を gate 前提に格上げ |
 | M6 | — | 2026-05-27 | **T-M6.1 CRITICAL: RTF 参照値の T 取り違え** (paper-summary L89/L113 の 0.0066/0.20/74.93M は 5 iter の値、T=4 acceptance にすると誤判定 → milestones L548/paper-summary 矛盾解消を申し送り)、共通 `scripts/orchestrate.py` + `eval/report.py` 一本化 (3 回再発明回避)、cloud run dir を resume 単一情報源、SWA 採用昇格、cloud provider コスト比較 (on-demand $40/h vs spot $0.6/h)、uv.lock cross-platform 検証、T-M6.2 post-filter fit は reverse 安定が前提 (β 連結) + 4 sub-model spot 分散、T-M6.3 T sweep step 非対称の偽 trend (wall-clock 等価で揃える) + sub-modeling 優先 |
-| M7 | — | — | — |
+| M7 | — | 2026-05-27 | **統計検定の誤用発見** (paired 設計に Mann-Whitney は誤用 → Wilcoxon signed-rank が正、t-test は論文対比補助)、**LibriTTS-R CC BY 4.0 帰属表示義務** (評価 web app で合成音声=改変物を配信、attribution 必須)、少人数では CMOS 主軸 (ACR 従)、bootstrap (BCa) CI + Spearman 相関 + ICC/α 信頼性、Holm 多重比較補正、webMUSHRA 全面委譲、`mos_results/` を個人データとして別格扱い (data minimization) |
