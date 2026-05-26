@@ -11,14 +11,14 @@
 | マイルストーン | チケット数 | pending | in_progress | in_review | completed | フェーズレビュー |
 |---|---|---|---|---|---|---|
 | M0 | 3 | 0 | 0 | 1 | 2 | ✅ 2026-05-26 |
-| M1 | 6 | 3 | 0 | 0 | 3 | ✅ 2026-05-26 |
+| M1 | 6 | 2 | 0 | 0 | 4 | ✅ 2026-05-26 |
 | M2 | 6 | 6 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M3 | 5 | 5 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M4 | 3 | 3 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M5 | 2 | 2 | 0 | 0 | 0 | ✅ 2026-05-26 |
 | M6 | 3 | 3 | 0 | 0 | 0 | ✅ 2026-05-27 |
 | M7 | 1 | 1 | 0 | 0 | 0 | ✅ 2026-05-27 |
-| **計** | **29** | **23** | **0** | **1** | **5** | 全 8 フェーズ完了 |
+| **計** | **29** | **22** | **0** | **1** | **6** | 全 8 フェーズ完了 |
 
 > **チケット作成ステータス**: 全 29 チケットが作成済み + フェーズレビュー (architect / ML / DevOps の 3 視点) 完了。`status` 列の `pending` は **実装着手前** を意味し、チケット文書自体は完成している。
 
@@ -40,7 +40,7 @@
 | T-M1.2 | [STFT module](T-M1.2-stft-module.md) | M | ✅ | T-M0.2 | claude |
 | T-M1.3 | [Mel-spectrogram 抽出](T-M1.3-mel-spectrogram.md) | S | ✅ | T-M0.2 | claude |
 | T-M1.4 | [Generator](T-M1.4-generator.md) | M | 📝 | T-M1.1 | — |
-| T-M1.5 | [Noise embedding (Diff)](T-M1.5-noise-embedding.md) | S | 📝 | T-M0.2 | — |
+| T-M1.5 | [Noise embedding (Diff)](T-M1.5-noise-embedding.md) | S | ✅ | T-M0.2 | claude |
 | T-M1.6 | [Sub-model wrapper](T-M1.6-sub-model.md) | M | 📝 | T-M1.2, T-M1.3, T-M1.4, T-M1.5 | — |
 
 ## M2: GAN-WaveNeXt 2

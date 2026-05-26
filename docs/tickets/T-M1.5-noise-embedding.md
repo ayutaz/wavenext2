@@ -3,11 +3,11 @@ id: T-M1.5
 title: Noise level embedding (sinusoidal + FC×2 SiLU, Diff 用)
 milestone: M1
 phase: M1
-status: pending
+status: completed
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.1, T-M0.2]
 blocks: [T-M1.6]
 related_docs:
@@ -316,9 +316,21 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 - **`factory` パターンの予約**: T-M1.2 (STFTModule) / T-M1.3 (MelTransform) / T-M1.4 (WaveNextGenerator) と統一して **`NoiseEmbedding.from_config(cfg)` クラスメソッド** を予約 (本チケットでは実装しない、T-M1.6 SubModelDiff 統合時に config 駆動の初期化を導入する際に追加)。これにより `cfg.model.sub_model.noise_embedding` ブロックから一発で `NoiseEmbedding` を構築できる
 - **再評価トリガー**: §8.1 の表を参照
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `sinusoidal_embedding` 関数 + `NoiseEmbedding` クラス実装、`tests/test_noise_embedding.py` 15 件 pass + 1 skip (snapshot 初回作成)。param 数 328,704 確定。
+- freq log-spaced (`freq[0]/freq[-1]=10000`)、`[sin;cos]` concat 順、ノルム² = half = 64 の不変量を検証。
+
+実装上の判断:
+1. **`input_rescale: float = 1.0` 引数を proactively 追加** (§9.1 の提案を先取り)。既定 1.0 は FastDiff 忠実 (c をそのまま)。M3.5 smoke 発散時に `NoiseEmbedding(input_rescale=1000.0)` で DDPM step 相当へ切替できる。`test_input_rescale_changes_output` で挙動差を検証。教訓: **ablation が予見されている箇所はフラグ引数を最初から用意しておくと後の切替がコード変更なしで済む**。
+2. **`fc1.bias` は zero init せず default** (FastDiff 準拠)。c=0 で bias 支配の懸念 (§6.1) は T-M1.6 統合時に再評価 (k=1 sub-model 不安定なら ablation)。
+3. **snapshot は JSON 要約 (mean/std) で committable + tolerant** (T-M1.1 と同方針)。SHA256 生テンソル pin はしない。
+4. **hypothesis / pytest-benchmark は導入せず** (新規 dep 回避)、不変量テスト (ノルム²=64 等) を明示ケースで代替。
+
+次の似たタスクで応用できる教訓:
+- sin²+cos²=1 のような数学的不変量はテストの錨として強力 (実装/dtype ドリフトに頑健)。
+- 予見された ablation はフラグ引数で「将来の自分」に橋を架けておく。
 
 ## 9. 後続タスクへの連絡事項
 

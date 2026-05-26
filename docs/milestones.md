@@ -240,11 +240,11 @@ class NoiseEmbedding(nn.Module):
         ...
 ```
 
-**Acceptance**:
-- [ ] `c = torch.tensor([0.5])` で出力 shape `(1, 512)`
-- [ ] 同じ c に対する出力が deterministic
-- [ ] 異なる c に対する出力が異なる (cosine similarity < 0.99)
-- [ ] freq の log-spaced 確認: `freq[0] / freq[-1] ≈ 10000` (= `log(10000)` スケール)
+**Acceptance** (`tests/test_noise_embedding.py`、2026-05-27 完了、15 件 pass):
+- [x] `c = torch.tensor([0.5])` で出力 shape `(1, 512)`、param 数 328,704
+- [x] 同じ c に対する出力が deterministic
+- [x] 異なる c に対する出力が異なる (cosine similarity < 0.99)
+- [x] freq の log-spaced 確認: `freq[0] / freq[-1] ≈ 10000`。`input_rescale=1.0` 既定 (M3.5 で 1000 ablation 可)
 
 ### M1.6 Sub-model wrapper (`src/wavenext2/models/sub_model.py`)
 **チケット**: [T-M1.6](tickets/T-M1.6-sub-model.md)
