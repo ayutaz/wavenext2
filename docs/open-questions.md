@@ -15,7 +15,7 @@
 | Audio 前処理 (peak norm = sox norm 等価, §C4) | ✅ 100% |
 | Discriminator / GAN Loss | ✅ 100% |
 | Diff 拡散式 / noise schedule | ✅ 100% |
-| Diff conditioning 注入方式 (additive bias) | ✅ 100% |
+| Diff conditioning 注入方式 (additive bias) | ⚠️ 推定 (論文 §3.3 は機構未記載、FastDiff 推定) — M1 review |
 | Diff sub-model partition (point-specialized 1-to-1) | ✅ 100% |
 | Diff reverse sampling | ✅ 100% |
 | Time-invariant post-filter | ✅ 100% |
@@ -26,6 +26,8 @@
 | Generator 最終 activation | ✅ 100% (`clip(-1, 1)`) |
 
 残るは Random seed や Validation utterance 数など、実装結果に微小な影響しか及ぼさない予備実験項目のみ (§D 参照)。
+
+> **補遺 (M1 phase review, 2026-05-27)**: 上表の一部「✅ 100%」は **論文本文では未記載で、参照実装 (FastDiff / Vocos) からの推定**であることが判明 (arXiv HTML §3 / Fig 2 を WebFetch で確認)。具体的には: (a) **mel と STFT-spec の結合方法** (concat→単一 conv か別経路か) §3.1 未記載、(b) **Diff conditioning が per-block 注入か 1 回か / additive か FiLM か** §3.3 未記載、(c) **embed の kernel/stride** 未記載、確認できたのは ConvNeXt n=8 のみ。Table 1 の param 数 (GAN sub-model=14.985M=WaveNeXt baseline 14.98M、Diff=14.42M) が唯一の客観証拠で、**per-block fc_t (2.1M) を含めると Diff が +14% 超過**し、fc_t 無し (または embed mel-only) なら一致する。conditioning 機構は §C7 を「推定」に格下げし、M3 着手前に user 判断 + smoke で確定する。
 
 ---
 
