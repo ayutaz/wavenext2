@@ -1122,7 +1122,7 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
   - DDPM 標準形 (`x_t` 式) → PDF Fig 1b で確定
   - 4-step noise schedule (`ᾱ = [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]`) → 確定
   - point-specialized partition (band 境界、1-to-1 dispatch) → 確定
-  - additive bias conditioning (per-block `Linear(512, 512)`) → 確定
+  - 射影なし additive bias conditioning (共有 NoiseEmbedding を各 block で直接加算、per-block fc_t 撤去 §C7) → 確定
   - BDDM noise predictor 不採用 (固定 4 値直接使用) → 確定
   - Optimizer / lr / betas / wd → docs/training.md §3.4 で確定
   - EMA 不使用 → 確定

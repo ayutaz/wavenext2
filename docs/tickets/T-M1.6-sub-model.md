@@ -584,7 +584,7 @@ class SubModelDiff(nn.Module):
 1. **§6.1 CRITICAL 戻り値意味の確定**: architecture.md §4 より **SubModelGAN は n_t (clip[-1,1] 残差) を返し、減算 y_{t-1}=y_t-n_t は T-M2.4 が行う**。sub-model は減算しない。
 2. **Diff の ε を clip してはいけない (重要)**: training.md §4.2 reverse は ε_pred を生で使い波形のみ clamp。ε~N(0,1) は \|ε\|>1 が ~32% で clip すると破壊的。→ **WaveNextGenerator に `final_activation="none"` を追加** (T-M1.4 を改訂)、SubModelDiff はこれを使う。GAN は "clip"。**教訓: 同一 generator を GAN(波形/残差) と Diff(ε) で再利用する場合、出力 activation はモードで変える必要がある (統合して初めて顕在化)**。
 3. **cond propagation テストは未訓練だと cosine 0.9998**: LayerScale γ=1e-6 で block が near-identity のため init 時の conditioning effect は小さい。閾値 cosine<0.999 は訓練前提で過剰 → 「出力が変わる (`(o0-o1).abs().max()>1e-3`)」の直接検証に変更。
-4. **Diff param +14% 超過 (per-block fc_t)**: SubModelDiff 16.46M vs Table 1 14.42M。fc_t (2.1M) を除けば 14.36M で一致 → **M1 phase review で per-block conditioning の要否を holistic に再評価** (T-M1.4 §8.3 と同件)。
+4. **Diff param +14% 超過 (per-block fc_t)**: SubModelDiff 16.46M vs Table 1 14.42M → ✅ **解決 (2026-05-27)**: per-block fc_t 撤去 (射影なし additive 注入)、SubModelDiff = **14.354M** (Table 1 −0.46%)。詳細 `docs/open-questions.md` §C7 (T-M1.4 §8.3 と同件)。
 
 次の似たタスクで応用できる教訓:
 - 共有部品 (generator) を複数モードで使い回すと、出力 activation や clip など「末端の差」が統合時に露見する。早めに最小統合テストを書くと検出が早い。

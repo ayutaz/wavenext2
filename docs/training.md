@@ -176,7 +176,7 @@ for batch in dataloader:
         + sqrt_one_minus_abar.view(-1, 1, 1) * eps
 
     # 3. sub_model k は連続 noise level c = √(1-ᾱ) を条件として受け取る
-    #    (FastDiff 流の sinusoidal embedding + FC × 2 swish + per-block additive bias)
+    #    (sinusoidal embedding + FC × 2 swish → 各 block で射影なし additive bias、§3.5)
     eps_pred = sub_model_k(mel, x_t, sqrt_one_minus_abar)
 
     loss = mse_loss(eps_pred, eps)  # Fig 1b
@@ -207,9 +207,10 @@ a = [1.0e-04, 2.8e-02, 5.6e-01, 9.1e-01]
 - **Batch size**: 20 (FastDiff デフォルト)
 - **Total steps per sub-model**: 1M 程度 (FastDiff の `max_updates = 1,000,000`)
 
-### 3.5 Noise level conditioning (FastDiff `module/FastDiff_model.py` で確定)
+### 3.5 Noise level conditioning (2026-05-27 エージェントチーム調査で確定)
 
-**注入方式は additive bias** (FiLM ではない)。詳細は `docs/architecture.md` §5.4 参照。
+**注入方式は射影なしの additive bias** (FiLM ではない、per-block 射影層なし)。Table 1 整合のため
+per-block `fc_t` を撤去した経緯は `docs/open-questions.md` §C7、構造詳細は `docs/architecture.md` §5.4 参照。
 
 ```python
 # 1. Sinusoidal embedding (sub-model forward あたり 1 回)
@@ -220,20 +221,19 @@ def sinusoidal_embedding(c, dim=128):
     e = c.unsqueeze(-1) * freq                              # (B, 64)
     return torch.cat([torch.sin(e), torch.cos(e)], dim=-1)  # (B, 128)
 
-# 2. Shared embedding head (sub-model ごとに 1 セット)
+# 2. Shared embedding head (NoiseEmbedding; sub-model ごとに 1 セット、実質の共有 projection)
 e = F.silu(self.fc_t1(sinusoidal_embedding(c, 128)))       # Linear(128, 512)
 e = F.silu(self.fc_t2(e))                                   # Linear(512, 512), → (B, 512)
 
-# 3. Per-block additive bias (各 ConvNeXt block の入口で 1 回だけ加算)
+# 3. 各 ConvNeXt block の入口で射影なし additive bias (共有 e を直接加算)
 for block in self.convnext_blocks:
-    bias = block.fc_t(e).unsqueeze(-1)   # Linear(512, 512) per block, (B, 512, 1)
-    x = x + bias                          # additive, broadcast over time
+    x = x + e.unsqueeze(-1)               # 射影なし, additive, broadcast over time
     x = block(x)                          # 通常の ConvNeXt forward
 ```
 
 - Sinusoidal は 128 dim (`log(10000)/63` log-spaced、`sin || cos`)
-- 各 sub-model は **独自の** sinusoidal head + 8 個の per-block `fc_t` projection を持つ (共有なし)
-- bias は **block の入口で 1 回だけ** 加算 (内部の Linear ごとには再加算しない)
+- 各 sub-model は **独自の** NoiseEmbedding head を持つ (sub-model 間で共有しない)
+- bias は **各 block の入口で加算** (射影なし; per-block 独立 `Linear(512,512)` は Table 1 +14% のため撤去)
 
 ## 4. 推論手順
 
@@ -418,7 +418,7 @@ y_post = np.convolve(y_synth, fir, mode="same")
 | EMA | ✅ 不使用 | Vocos / WaveFit-PT |
 | Audio 正規化 | ✅ Vocos sox `norm` (train: U(-6,-1), val: -3 dB) | Vocos `vocos/dataset.py` |
 | Mel 正規化 | ✅ `log(clamp(mel, min=1e-5))`, slaney scale | Vocos `safe_log` + HiFi-GAN 慣例 |
-| Diff conditioning 注入 | ✅ additive bias (per-block independent `Linear(512, dim)`) | FastDiff `module/FastDiff_model.py` |
+| Diff conditioning 注入 | ✅ 射影なし additive bias (共有 NoiseEmbedding を各 block で直接加算、per-block fc_t 撤去) | 2026-05-27 エージェントチーム調査 (open-questions §C7) |
 | K=4 sub-model dispatch | ✅ point-specialized 1-to-1 | 論文 §3.3 + Table 1 (4 × 14.42M) |
 
 詳細な未確定事項 (残るは予備実験項目のみ) は `docs/open-questions.md` を参照。

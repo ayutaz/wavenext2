@@ -220,7 +220,7 @@ class WaveNextGenerator(nn.Module):
 - [x] GAN 設定 (input_channels=2176, hop=300, n_fft=2048): 入力 `(B, 2176, 80)` → 出力 `(B, 24000)`
 - [x] Diff 設定 (input_channels=1152, hop=256, n_fft=1024): 入力 `(B, 1152, 94)` → 出力 `(B, 24064)`
 - [x] 出力範囲が `[-1, 1]` に収まる (clip が機能、`*1e6` でも飽和)
-- [x] パラメータ数: GAN **15.43M** (embed kernel=1、Table 1 14.99M +2.9% ✓)。Diff Generator 16.13M は per-block fc_t 過剰で Table 1 14.42M +14% → M1 phase review で fc_t 要否を再評価 (T-M1.4 §8.3)
+- [x] パラメータ数: GAN **15.43M** (embed kernel=1、Table 1 14.99M +2.9% ✓)。Diff Generator は per-block fc_t 撤去後 **14.03M** (+NoiseEmbedding 0.33M で sub-model 14.354M、Table 1 14.42M −0.46% ✓、2026-05-27 確定 §C7)
 - [ ] 重み初期化: `Conv1d.weight.std() ≈ 0.02`, `Linear.bias` がゼロ
 
 ### M1.5 Noise embedding (`src/wavenext2/models/noise_embedding.py`) [Diff のみ]
@@ -273,7 +273,7 @@ class SubModelDiff(nn.Module):
 **Acceptance** (`tests/test_sub_model.py`、2026-05-27 完了、18 件 pass):
 - [x] GAN: `mel(B, 128, 80) + y_prev(B, 24000) → n_t(B, 24000)` (clip[-1,1]、減算 y_{t-1}=y_t-n_t は T-M2.4)
 - [x] Diff: `mel(B, 128, 94) + x_t(B, 24064) + c(B,) → ε_pred(B, 24064)` (clip なし=final_activation "none")
-- [x] パラメータ数: GAN 15.43M (Table 1 14.99M +2.9%)。Diff 16.46M は per-block fc_t 超過 (Table 1 14.42M +14%) → M1 phase review で fc_t 要否再評価
+- [x] パラメータ数: GAN 15.43M (Table 1 14.99M +2.9%)。Diff は per-block fc_t 撤去後 14.354M (Table 1 14.42M −0.46% ✓、2026-05-27 確定 §C7)
 - [x] forward + backward 動作、CONCAT_ORDER=("mel","stft_spec")、from_config 対応
 
 ---

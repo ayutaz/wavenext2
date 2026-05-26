@@ -15,7 +15,7 @@ SNAP_DIR = Path(__file__).parent / "snapshots"
 # 論文/Vocos 整合の理論パラメータ数
 # gamma(512) + dwconv(7*512+512) + LN(2*512) + pwconv1(512*1536+1536) + pwconv2(1536*512+512)
 GAN_PARAMS = 512 + (7 * 512 + 512) + 2 * 512 + (512 * 1536 + 1536) + (1536 * 512 + 512)  # 1,580,544
-FC_T_PARAMS = 512 * 512 + 512  # 262,656
+# Diff block も同一パラメータ数: conditioning は射影なしの additive 注入 (per-block fc_t 撤去, §C7)
 
 
 # --- shape ---------------------------------------------------------------------
@@ -46,10 +46,18 @@ def test_param_count_gan():
     assert sum(p.numel() for p in block.parameters()) == GAN_PARAMS
 
 
-def test_param_count_diff_delta():
+def test_param_count_diff_no_extra():
+    # conditioning は parameter-free な additive 注入 → Diff block は GAN block と同一パラメータ数
+    # (per-block fc_t Linear(512,512) は Table 1 +14% 乖離のため撤去, §C7)
     gan = sum(p.numel() for p in ConvNeXtBlock(conditioning_dim=None).parameters())
     diff = sum(p.numel() for p in ConvNeXtBlock(conditioning_dim=512).parameters())
-    assert diff - gan == FC_T_PARAMS
+    assert diff == gan
+
+
+def test_error_conditioning_dim_must_equal_dim():
+    # 射影なし直接加算のため conditioning_dim != dim は不許可
+    with pytest.raises(ValueError, match="must equal dim"):
+        ConvNeXtBlock(dim=512, conditioning_dim=256)
 
 
 # --- gradient flow -------------------------------------------------------------

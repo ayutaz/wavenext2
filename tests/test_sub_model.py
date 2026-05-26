@@ -9,7 +9,9 @@ from wavenext2.models import CONCAT_ORDER, SubModelDiff, SubModelGAN
 
 # 厳密パラメータ数 (T-M1.4 の generator + Diff は NoiseEmbedding)。Table 1 比較はコメント。
 GAN_PARAMS = 15_427_674  # = generator (Table 1 14.99M +2.9%)
-DIFF_PARAMS = 16_126_978 + 328_704  # generator + NoiseEmbedding = 16,455,682
+DIFF_PARAMS = (
+    14_025_730 + 328_704
+)  # generator + NoiseEmbedding = 14,354,434 (Table 1 14.42M −0.46%)
 
 
 @pytest.fixture(scope="module")
@@ -65,8 +67,8 @@ def test_diff_output_not_clipped(diff):
 
 
 def test_diff_param_count(diff):
-    # generator (per-block fc_t 含む 16.13M) + NoiseEmbedding 0.33M = 16.46M。
-    # Table 1 Diff 14.42M を +14% 超過 (per-block fc_t 起因)。fc_t 要否は M1 phase review。
+    # generator 14.03M + NoiseEmbedding 0.33M = 14.354M。Table 1 Diff 14.42M に対し −0.46%。
+    # per-block fc_t 撤去後 (§C7): 共有 NoiseEmbedding を射影なしで各 block に additive 注入。
     assert sum(p.numel() for p in diff.parameters()) == DIFF_PARAMS
 
 
@@ -76,8 +78,8 @@ def test_diff_input_channels(diff):
 
 def test_diff_cond_propagation(diff):
     # 異なる noise level c で出力が変わること (conditioning が伝播)。
-    # 未訓練時は LayerScale γ=1e-6 で block が near-identity のため effect は減衰するが、
-    # additive bias は residual に乗るので出力は確実に変化する。
+    # cond は各 block 入口で residual stream に直接加算されるため (γ を介さない)、
+    # 未訓練でも出力は確実に変化する。
     diff.eval()
     mel, x_t = torch.randn(2, 128, 40), torch.randn(2, 10240)
     with torch.no_grad():

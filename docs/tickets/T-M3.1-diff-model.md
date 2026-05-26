@@ -572,7 +572,7 @@ class DiffWaveNext2(nn.Module):
   - **Diffusion 式**: ✅ DDPM 標準形 `x_t = √ᾱ · x_0 + √(1-ᾱ) · ε` で確定 (PDF Fig 1b 画像確認)
   - **4 値固定 schedule**: ✅ `[1.0e-4, 2.8e-2, 5.6e-1, 9.1e-1]` を直接使用 (BDDM predictor 再現不要)
   - **Point-specialized partition**: ✅ 1-to-1 mapping、band 境界は隣接 schedule 点の中点 (`docs/architecture.md` §5)
-  - **Diff conditioning 注入**: ✅ additive bias、per-block 独立 `Linear(512, 512)` (T-M1.5 / T-M1.4 で実装済)
+  - **Diff conditioning 注入**: ✅ 射影なし additive bias、共有 NoiseEmbedding を各 block で直接加算 (per-block fc_t は Table 1 +14% のため撤去、2026-05-27 §C7。T-M1.1/T-M1.5 で実装済)
   - **4 sub-model 独立訓練**: ✅ Table 1 (57.68M = 14.42M × 4) で確定
 - 旧来の判断ポイント (本チケット作成時に確定):
   - **`forward` の引数 (mel, x_t, c, k) vs (mel, x_t, c) で k は別 API**: `forward(mel, x_t, c, k)` を採用 (`sample_noise_level(k)` と対応)

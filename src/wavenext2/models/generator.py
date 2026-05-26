@@ -33,7 +33,8 @@ class WaveNextGenerator(nn.Module):
         intermediate_dim: ConvNeXt MLP hidden (1536)。
         n_blocks: ConvNeXt block 数 (8)。
         kernel_size: ConvNeXt depthwise kernel (7)。
-        conditioning_dim: None=GAN, 512=Diff (additive bias)。
+        conditioning_dim: None=GAN, 512=Diff。指定時は各 block で cond を射影なし additive 注入
+            (per-block fc_t は Table 1 と +14% 乖離のため撤去、open-questions §C7)。
         layer_scale_init: ConvNeXt LayerScale 初期値 (1e-6)。
         embed_kernel_size: 入力 embed Conv1d の kernel。既定 1 (Table 1 整合、上記参照)。
         final_activation: "clip" (既定、GAN の波形/残差出力) / "tanh" (M3 compile fallback 予約) /

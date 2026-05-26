@@ -407,7 +407,8 @@ size=M (中規模) のため標準編成 (Implementer 1 + Reviewer 1 + Tester 1)
 **M1 phase review (2026-05-27) 追記 — per-block fc_t の妥当性に疑問**:
 - 論文 §3.3 は conditioning 機構 (per-block か 1 回か、additive か FiLM か) を**明記していない** (arXiv HTML 確認)。per-block fc_t は FastDiff からの推定。
 - Table 1 の Diff sub-model = 14.42M に対し、**per-block fc_t (8×0.263M=2.1M) を含む現実装は +14% 超過**。fc_t を共有 1 個 or NoiseEmbedding 直結 (1 回注入) にすると Table 1 と一致 (−0.5%)。GAN/Diff を mel-only embed + fc_t 無しで揃えると両方 −1.4% で対称一致。
-- **教訓: 論文が沈黙している箇所を参照実装で埋めた推定は、必ず hard number (Table 1 param) で検算する。乖離したら推定を疑う**。conditioning 機構の最終確定は user 判断 + M3 smoke。本 ConvNeXtBlock は per-block fc_t を保持したまま (変更は user 決裁後)。
+- **教訓: 論文が沈黙している箇所を参照実装で埋めた推定は、必ず hard number (Table 1 param) で検算する。乖離したら推定を疑う**。
+- ✅ **解決 (2026-05-27, user 委譲のエージェントチーム調査)**: per-block fc_t を**撤去**し、共有 NoiseEmbedding を射影なしで各 block 入口に additive 注入する方式に変更 (sub-model=14.354M, Table 1 −0.46%)。Okamoto21 (DiffWave 流 per-block additive) の骨格に一致。現 `ConvNeXtBlock` は `conditioning_dim` 指定時に `x + cond.unsqueeze(-1)` を行い、射影層は持たない。詳細は `docs/open-questions.md` §C7。
 
 ## 9. 後続タスクへの連絡事項
 

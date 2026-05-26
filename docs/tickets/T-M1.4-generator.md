@@ -535,9 +535,9 @@ def test_cond_mismatch_raises(gan_model, diff_model):
 - **embed kernel=1** (1×1 射影 1.11M、GAN 計 **15.43M** = Table 1 +2.9%、±5% 内) を採用。concat 設計を尊重し、時間文脈は後段 block の depthwise k=7 が担う。architecture.md L34 を kernel=7→1 に修正。
 - 教訓: **構造図の kernel は参照実装 (Vocos の mel-only embed) からの慣性で誤って大入力に転写されがち。published param 数 (Table 1 の厳密倍数) で逆算検算すると設計の誤りを検出できる**。
 
-**【未解決・M1 phase review へ申し送り】 Diff の per-block fc_t 過剰**:
-- Diff Generator (per-block fc_t 8×0.263M=2.1M 含む) = 16.13M。+NoiseEmbedding 0.33M で sub-model 計 16.46M vs Table 1 **14.42M (+14%、±5% 外)**。
-- **fc_t を除くと Diff = 14.36M で Table 1 と一致** (-0.4%)。→ per-block conditioning (open-questions §C7 の FastDiff 解釈) が paper の実際の conditioning より重い可能性。T-M1.1 は commit 済のため、conditioning 機構の再評価は M1 phase review で holistic に判断する。
+**【✅ 解決 (2026-05-27)】 Diff の per-block fc_t 過剰**:
+- Diff Generator (per-block fc_t 8×0.263M=2.1M 含む) = 16.13M。+NoiseEmbedding 0.33M で sub-model 計 16.46M vs Table 1 **14.42M (+14%、±5% 外)** だった。
+- user 委譲のエージェントチーム調査で **per-block fc_t を撤去** (共有 NoiseEmbedding を射影なしで各 block に additive 注入)。Diff Generator = **14.03M**、sub-model 計 **14.354M** (Table 1 −0.46%)。詳細 `docs/open-questions.md` §C7。
 
 次の似たタスクで応用できる教訓:
 - 派生モジュールの param 数は published Table の**厳密倍数構造**で検算する (29.97=2×, 74.93=5× が kernel=7 を即座に棄却した)。

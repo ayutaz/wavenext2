@@ -38,7 +38,7 @@ LayerNorm(512, eps=1e-6)
   │
   ▼
 ConvNeXt block × 8        ← n = 8 (全モデル共通) [PDF Fig 2]
-  │  (Diff 版のみ各 block に Linear(512, 512) で射影された noise emb を additive bias で加算)
+  │  (Diff 版のみ各 block 入口で共有 noise emb (512次元) を射影なし additive bias で加算, §5.4)
   ▼
 LayerNorm(512, eps=1e-6)  ← head 前の最終正規化 [Vocos 慣例]
   │
@@ -61,8 +61,10 @@ Synthesized waveform (= ノイズ成分 n_{t-1})
 > (22M なら 2 iter=44M のはず)。ConvNeXt×8 (12.64M)+heads (1.67M)=14.31M が大半を占め embed には
 > ~0.67M しか残らない。**embed kernel=1** (1×1 channel 射影 = 1.11M、GAN 計 15.43M = Table 1 +2.9%) を
 > 採用。時間方向の文脈は後段 ConvNeXt block の depthwise kernel=7 が担うため kernel=1 で機能上問題なし。
-> **未解決の関連事項**: Diff sub-model は per-block fc_t (8×0.263M=2.1M) を含めると 16.46M で Table 1 の
-> 14.42M を +14% 超過 (fc_t 無しなら 14.36M で一致)。per-block conditioning の要否は要再検討 (M1 phase review)。
+> **関連事項 (2026-05-27 解決)**: Diff sub-model は per-block fc_t (8×0.263M=2.1M) を含めると 16.46M で
+> Table 1 の 14.42M を +14% 超過した。エージェントチーム調査 + Table 1 連立復元の結果、per-block fc_t を
+> **撤去**し共有 NoiseEmbedding を射影なしで各 block に additive 注入する方式に変更 (sub-model=14.354M, −0.46%)。
+> 詳細は §5.4 / open-questions §C7。
 
 ### 設計上の意図
 - **元 WaveNeXt の `linear_1` の出力次元 `n_fft+2` は Vocos の `ISTFTHead` の `Linear(dim → n_fft+2)` と一致**
@@ -97,7 +99,7 @@ Synthesized waveform (= ノイズ成分 n_{t-1})
   x = x.transpose(1, 2)      # (B, C, T)
   x = residual + x
   ```
-- **Diff 版のみ追加**: 各 block の入口 (residual 取得直後、dwconv 前) で `x = x + fc_t(e).unsqueeze(-1)` の **additive bias** を加算 (詳細は §5.4)
+- **Diff 版のみ追加**: 各 block の入口 (residual 取得前、dwconv 前) で `x = x + e.unsqueeze(-1)` の **射影なし additive bias** を加算 (`e`=共有 NoiseEmbedding 出力 512次元; per-block fc_t は撤去, 詳細は §5.4)
 
 ## 3. STFT module (統一フレームワークの要)
 
@@ -306,18 +308,23 @@ e = F.silu(self.fc_t2(e))                       # (B, 512)
 - 活性化: **Swish (SiLU)**
 - forward あたり 1 回だけ計算 (全 ConvNeXt block で共有)
 
-#### Per-block projection と additive bias 注入 (NOT FiLM)
-各 ConvNeXt block ごとに独立した projection を持ち、**additive bias** として加算:
+#### Additive bias 注入 (射影なし、NOT FiLM) — per-block fc_t は撤去
+
+**設計判断 (2026-05-27、エージェントチーム調査 + Table 1 連立復元)**: 当初は FastDiff/DiffWave 流に
+各 ConvNeXt block が独立 `Linear(512,512)` (per-block fc_t、8 block 計 2.1M) を持つ設計だったが、
+論文 **Table 1 の Diff sub-model=14.42M を +14% 超過**し丸め誤差では説明不可能なため **撤去**。
+共有 NoiseEmbedding (内部に `Linear(512,512)+SiLU` の学習射影を持つ) の 512次元出力を、各 block
+入口で **射影なしの additive bias** として直接加算する。これで sub-model=14.354M (−0.46%) と Table 1
+にほぼ一致する。
 
 ```python
 class ConvNeXtBlockDiff(nn.Module):
-    def __init__(self, dim=512, emb_dim=512):
+    def __init__(self, dim=512):
         ...
-        self.fc_t = nn.Linear(emb_dim, dim)     # per-block
+        # per-block fc_t は持たない (Table 1 整合)
 
-    def forward(self, x, e):                     # x:(B,C,T), e:(B,512)
-        bias = self.fc_t(e).unsqueeze(-1)        # (B,C,1)
-        h = x + bias                              # additive, broadcast over T
+    def forward(self, x, e):                     # x:(B,C,T), e:(B,512)=共有 NoiseEmbedding 出力
+        h = x + e.unsqueeze(-1)                   # additive, 射影なし, broadcast over T
         # 以降は通常の ConvNeXt block
         residual = h
         h = self.dwconv(h)
@@ -329,10 +336,15 @@ class ConvNeXtBlockDiff(nn.Module):
 ```
 
 #### 重要な点
-- FastDiff は **FiLM (scale+shift) ではなく additive bias** を採用
-- bias は **block の入口で 1 回だけ加算** (内部の Linear 層ごとには再加算しない)
-- 各 sub-model k は **独自の** sinusoidal head + 8 個の per-block `fc_t` projection を持つ (sub-model 間で共有しない)
-- 各 ConvNeXt block ごとに `fc_t` の重みは独立 (block ごとに `nn.Linear(512, 512)` を新規作成)
+- **FiLM (scale+shift) ではなく additive bias**。注入形式は DiffWave/Okamoto21 (WaveNeXt 2 の
+  sub-modeling 直系祖先) の「共有 step embedding を各層で additive」の骨格に一致。
+- bias は **各 block の入口で加算** (per-block 注入は維持; DiffWave 同様、層をまたいで強化される)。
+- **per-block の射影層は持たない**。共有 NoiseEmbedding の最終 `Linear(512,512)` が実質の共有 projection。
+  per-block 独立 `Linear(512,512)` は Table 1 が数学的に許容しない (+14%) ため撤去 (open-questions §C7)。
+- 各 sub-model k は **独自の** NoiseEmbedding head を持つ (sub-model 間で共有しない)。
+- DiffWave は per-layer に軽量 `Linear(512, residual_ch)` を持つが、ConvNeXt は width=512 が大きく
+  8×`Linear(512,512)`=2.1M が予算超過。共有射影 (+1.4%) より射影なし (−0.46%) が Table 1 に近いため後者を採用。
+  - smoke で conditioning が弱い兆候 (noise level 不感) が出た場合は共有 `Linear(512,512)` 1 個 (+1.4%) の追加を ablation。
 
 ### Post-filter (Time-invariant spectral enhancement) [Okamoto21 §3.3 で確定]
 

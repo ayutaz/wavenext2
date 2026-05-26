@@ -1,11 +1,17 @@
 """Diff-WaveNeXt 2 の noise-level embedding (FastDiff 流 sinusoidal + FC×2 SiLU).
 
 連続値 noise level `c = √(1-ᾱ)` (∈ [0,1]) を `(B, 512)` の埋め込みに写像する
-**shared head**。各 ConvNeXt block (T-M1.1) の per-block `fc_t: Linear(512,512)` が
-この出力を additive bias に射影する。per-block projection は本モジュールに含めない。
+**shared head**。この 512次元出力は各 ConvNeXt block (T-M1.1) の入口で **射影なしの additive bias**
+として直接加算される。最終 `Linear(512,512)+SiLU` が実質の共有 projection を担うため、block 側に
+per-block 射影層は持たない (Table 1 整合; 詳細は下記)。
+
+**per-block fc_t 撤去 (2026-05-27)**: 当初は各 block が独立 `Linear(512,512)` を持つ FastDiff/DiffWave
+流だったが、8 block 計 2.1M が論文 Table 1 の Diff sub-model=14.42M を +14% 超過するため撤去。
+共有 head 直接加算で sub-model=14.354M (−0.46%)。注入形式は DiffWave/Okamoto21 の「共有 step
+embedding を各層で additive」骨格に一致。
 
 discrete index lookup の `nn.Embedding` ではなく、連続値を埋め込む点に注意。
-確定根拠: docs/architecture.md §5.4、docs/open-questions.md §C7 (FastDiff 仕様)。
+確定根拠: docs/architecture.md §5.4、docs/open-questions.md §C7。
 """
 
 from __future__ import annotations

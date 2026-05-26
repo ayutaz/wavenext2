@@ -15,7 +15,7 @@
 | Audio 前処理 (peak norm = sox norm 等価, §C4) | ✅ 100% |
 | Discriminator / GAN Loss | ✅ 100% |
 | Diff 拡散式 / noise schedule | ✅ 100% |
-| Diff conditioning 注入方式 (additive bias) | ⚠️ 推定 (論文 §3.3 は機構未記載、FastDiff 推定) — M1 review |
+| Diff conditioning 注入方式 (射影なし additive bias) | ✅ 確定 (2026-05-27 エージェントチーム調査 + Table 1 連立復元、§C7)。per-block fc_t は撤去 |
 | Diff sub-model partition (point-specialized 1-to-1) | ✅ 100% |
 | Diff reverse sampling | ✅ 100% |
 | Time-invariant post-filter | ✅ 100% |
@@ -27,7 +27,9 @@
 
 残るは Random seed や Validation utterance 数など、実装結果に微小な影響しか及ぼさない予備実験項目のみ (§D 参照)。
 
-> **補遺 (M1 phase review, 2026-05-27)**: 上表の一部「✅ 100%」は **論文本文では未記載で、参照実装 (FastDiff / Vocos) からの推定**であることが判明 (arXiv HTML §3 / Fig 2 を WebFetch で確認)。具体的には: (a) **mel と STFT-spec の結合方法** (concat→単一 conv か別経路か) §3.1 未記載、(b) **Diff conditioning が per-block 注入か 1 回か / additive か FiLM か** §3.3 未記載、(c) **embed の kernel/stride** 未記載、確認できたのは ConvNeXt n=8 のみ。Table 1 の param 数 (GAN sub-model=14.985M=WaveNeXt baseline 14.98M、Diff=14.42M) が唯一の客観証拠で、**per-block fc_t (2.1M) を含めると Diff が +14% 超過**し、fc_t 無し (または embed mel-only) なら一致する。conditioning 機構は §C7 を「推定」に格下げし、M3 着手前に user 判断 + smoke で確定する。
+> **補遺 (M1 phase review, 2026-05-27)**: 上表の一部「✅ 100%」は **論文本文では未記載で、参照実装 (FastDiff / Vocos) からの推定**であることが判明 (arXiv HTML §3 / Fig 2 を WebFetch で確認)。具体的には: (a) **mel と STFT-spec の結合方法** (concat→単一 conv か別経路か) §3.1 未記載、(b) **Diff conditioning が per-block 注入か 1 回か / additive か FiLM か** §3.3 未記載、(c) **embed の kernel/stride** 未記載、確認できたのは ConvNeXt n=8 のみ。Table 1 の param 数 (GAN sub-model=14.985M=WaveNeXt baseline 14.98M、Diff=14.42M) が唯一の客観証拠で、**per-block fc_t (2.1M) を含めると Diff が +14% 超過**し、fc_t 無し (または embed mel-only) なら一致する。
+
+> **解決 (2026-05-27 エージェントチーム調査)**: 上記 (b) conditioning 機構を確定 → **per-block fc_t 撤去**、共有 NoiseEmbedding を射影なしで各 block に additive 注入 (sub-model=14.354M, −0.46%)。詳細は §C7。残る (a) mel/STFT 結合方法と (c) embed kernel/stride は依然未記載で、現実装は concat→単一 conv (kernel=1) を採用。GAN sub-model が +2.9% 過大 (STFT concat 2048ch を embed に通すため) なのは (a)/(c) が論文と異なる可能性を示唆するが、STFT module は §3.1 の中核のため現設計を維持し、許容範囲として T-M2.4 レビューでフラグ。
 
 ---
 
@@ -256,23 +258,40 @@ audio = sox_effects.apply_effects_tensor(audio, sr=24000, effects=[["norm", "-3.
   - EPS = 1e-5
 - **Loss 重み (LibriTTS)**: D-GAN=1.0, D-Feature=10.0, MRSTFT-SC=2.5, MRSTFT-Mag=2.5, Mel-MAE=0.0
 
-### C7. Diff Noise level conditioning [FastDiff `module/FastDiff_model.py`]
+### C7. Diff Noise level conditioning [2026-05-27 エージェントチーム調査で確定]
 
-**方式: additive bias (NOT FiLM)**。各 ConvNeXt block ごとに独立 projection。
+**方式: 射影なしの additive bias (NOT FiLM、per-block 独立 projection なし)**。
+
+> **決定経緯 (2026-05-27)**: 論文 §3.3 は注入機構を未記載。当初は FastDiff の記述から「per-block 独立
+> `Linear(512,512)` で additive 注入」と推定したが、これだと Diff sub-model が 16.46M で **Table 1 の
+> 14.42M を +14% 超過**する。3 体のエージェントチームで (A) 各 OSS の conditioning 機構、(B) Table 1 の
+> パラメータ数連立復元、(C) Okamoto 系列の慣行 を並行調査・議論した結果、以下を確定:
+>
+> - **Table 1 (論文が印刷した硬い数値) が最優先の再現制約**。per-block 独立 `Linear(512,512)` (+14%) と
+>   per-block FiLM (+28%) は丸め誤差で説明不可能なため **棄却**。
+> - **Agent A 発見**: 現実装の「`Linear(512,512)` を活性化に加算」は実は FastDiff 流ではなく DiffWave 流。
+>   FastDiff の per-block 射影は LVC kernel predictor の条件側 (~80次元) への軽量射影で、ConvNeXt に直移植不可。
+> - **Agent B 発見**: 共有 head を射影なしで各 block に直接加算すれば sub-model=14.354M (**−0.46%**) で最も整合。
+>   また GAN−Diff の 0.565M 差は出力 linear のサイズ差 0.549M でほぼ完全説明でき、両モデルの conditioning は
+>   実質ゼロ〜0.26M しか足せないことが連立から裏付けられた。
+> - **Agent C 一次資料確認**: WaveNeXt 2 の sub-modeling 直系祖先 Okamoto21 は DiffWave backbone +
+>   per-block additive (共有 step embedding を各層で加算、FiLM ではない)。射影なし直接加算はこの骨格に一致。
+>
+> → **per-block fc_t を撤去**。実装: `src/wavenext2/models/convnext.py` (cond は射影なしで `x + cond.unsqueeze(-1)`)。
+> smoke で conditioning 不感の兆候が出れば共有 `Linear(512,512)` 1 個 (+1.4%) の追加を ablation する。
 
 #### Sinusoidal embedding (`calc_diffusion_step_embedding`)
 - 入力: `c = √(1-ᾱ)` (連続値)
 - 出力次元: 128
 - 標準 DDPM/Transformer 形式: `freq = exp(-arange(64) * log(10000)/63)`, `[sin(c*freq); cos(c*freq)]`
 
-#### Shared head
-- `Linear(128, 512)` → SiLU → `Linear(512, 512)` → SiLU
-- forward あたり 1 回計算、全 ConvNeXt block で共有
+#### Shared head (NoiseEmbedding) — 実質の共有 projection を兼ねる
+- `Linear(128, 512)` → SiLU → `Linear(512, 512)` → SiLU (sub-model ごとに 1 セット、全 block で共有)
+- forward あたり 1 回計算
 
-#### Per-block 注入
-- 各 block ごとに **独立した** `nn.Linear(512, dim=512)`
-- block の入口 (residual 取得前、dwconv 前) で `x = x + fc_t(e).unsqueeze(-1)` を加算
-- 時間軸への broadcast は `unsqueeze(-1)`
+#### 各 block への注入 (射影なし)
+- block の入口 (residual 取得前、dwconv 前) で `x = x + e.unsqueeze(-1)` を加算 (`e`=上記 shared head 出力 512次元)
+- **per-block の射影層は持たない** (Table 1 整合)。時間軸への broadcast は `unsqueeze(-1)`
 
 詳細擬似コードは `docs/architecture.md §5.4 / docs/training.md §3.5` 参照。
 

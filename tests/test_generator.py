@@ -10,7 +10,8 @@ from wavenext2.models.generator import WaveNextGenerator
 
 # 実装 (embed kernel=1) の厳密パラメータ数。Table 1 との比較はコメント参照。
 GAN_PARAMS = 15_427_674  # ≈ Table 1 GAN sub-model 14.99M +2.9% (embed kernel=1, concat 2176)
-DIFF_GEN_PARAMS = 16_126_978  # Generator のみ。+NoiseEmbedding 0.33M で sub-model 計
+# per-block fc_t 撤去後 (§C7)。embed(1152→512)+8 block+linear×2+LN。+NoiseEmbedding 0.33M で sub-model 計
+DIFF_GEN_PARAMS = 14_025_730
 
 
 @pytest.fixture(scope="module")
@@ -60,9 +61,8 @@ def test_param_count_gan(gan_model):
 
 
 def test_param_count_diff_generator(diff_model):
-    # Generator 本体。per-block fc_t (8×0.263M=2.1M) を含むため Table 1 14.42M を超過。
-    # +NoiseEmbedding 0.33M (T-M1.6) で sub-model 計 ~16.46M vs 14.42M (+14%)。
-    # → per-block fc_t の要否は M1 phase review で再評価 (fc_t なしなら ~14.36M で一致)。
+    # Generator 本体 (per-block fc_t 撤去後)。14.03M。
+    # +NoiseEmbedding 0.33M (T-M1.6) で sub-model 計 14.354M vs Table 1 14.42M (−0.46%)。
     assert sum(p.numel() for p in diff_model.parameters()) == DIFF_GEN_PARAMS
 
 

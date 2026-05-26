@@ -535,7 +535,7 @@ logging:
     3. **T-M3.1** (BAND_BOUNDS 計算誤り、`c` の値域が想定外)
     4. **T-M3.2** (MSE 計算誤り、noise scaling `√abar` / `√(1-abar)` 取り違え、bf16 c 精度)
     5. **T-M1.4** (Generator output head、Linear → reshape → clip)
-    6. **T-M1.1** (ConvNeXt block への additive bias 注入、FiLM ではなく per-block 独立 `Linear(512, 512)`)
+    6. **T-M1.1** (ConvNeXt block への additive bias 注入、FiLM ではなく射影なし直接加算。per-block fc_t は撤去, §C7)
 - **`c * 1000` rescale 申し送り**: sub-model 4 が学習しない場合、本 smoke で `c_rescale` config (T-M3.2) を 1.0 → 1000.0 に切替えて ablation を最優先で実施
 
 #### T-M6.2 (4 sub-model 本格訓練) へ

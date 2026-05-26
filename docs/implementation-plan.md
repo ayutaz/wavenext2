@@ -356,7 +356,7 @@ data:
 | ConvNeXt 内部次元 | ✅ **解決** | embed=512, intermediate=1536, kernel=7, LayerScale init=1e-6 (Vocos) |
 | Mel 正規化 | ✅ **解決** | `log(clamp(mel, min=1e-5))`, 自然対数, slaney scale/norm, power=1 |
 | Audio 正規化 | ✅ **解決** | Vocos sox `norm` (train: U(-6,-1) dB, val: -3 dB) |
-| Diff conditioning 注入 | ✅ **解決** | additive bias (FiLM ではない)、per-block 独立 `Linear(512, dim)`、block 入口で 1 回加算 (FastDiff) |
+| Diff conditioning 注入 | ✅ **確定** (2026-05-27 §C7) | 射影なし additive bias (FiLM ではない)。共有 NoiseEmbedding を各 block 入口で直接加算。per-block 独立 `Linear(512,512)` は Table 1 +14% のため撤去 |
 | Diff sinusoidal embedding | ✅ **解決** | 128 dim, `log(10000)/63` log-spaced, sin\|\|cos, FC×2 SiLU (FastDiff) |
 | Optimizer / LR / scheduler | ✅ **解決** | GAN: AdamW + InverseLR, Diff: Adam |
 | BDDM noise predictor の不在 | ✅ **解決** | 論文の 4 値固定スケジュールを直接使用 |

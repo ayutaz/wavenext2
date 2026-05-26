@@ -62,7 +62,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Generator output head**: `Linear(512, n_fft+2)` → `Linear(n_fft+2, hop, bias=False)` → reshape → `clip(-1, 1)` (元 WaveNeXt poster + wetdog 実装)
 - **STFT loss / Discriminator**: WaveFit-PT (`yukara-ikemiya/wavefit-pytorch`) 完全準拠。**MSD ×3 のみ、MPD なし**
 - **Diff sub-model partition**: point-specialized 1-to-1 mapping (band 境界は隣接 schedule 点の中点、`docs/architecture.md` §5)
-- **Diff conditioning 注入**: additive bias (FiLM ではない)、per-block 独立 `Linear(512, 512)` (FastDiff)
+- **Diff conditioning 注入**: 射影なしの additive bias (FiLM ではない)。共有 NoiseEmbedding (512次元) を各 ConvNeXt block 入口で直接加算。**per-block 独立 `Linear(512,512)` は Table 1 と +14% 乖離のため撤去** (2026-05-27 エージェントチーム調査、`docs/open-questions.md` §C7)
 - **Mel 正規化**: `torch.log(clamp(mel, min=1e-5))`, slaney scale/norm, power=1.0
 - **Audio 正規化**: Vocos sox `norm` (train: U(-6,-1) dB, val: -3 dB)
 - **EMA**: 不使用 (Vocos / WaveFit-PT 共に未使用)
