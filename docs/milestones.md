@@ -203,7 +203,7 @@ class WaveNextGenerator(nn.Module):
     def __init__(self, input_channels, dim=512, intermediate_dim=1536,
                  n_blocks=8, kernel_size=7, n_fft, hop_length,
                  conditioning_dim=None):
-        # Conv1d(in=input_channels, out=dim, k=7, p=3)
+        # Conv1d(in=input_channels, out=dim, k=1, p=0)  ← embed kernel=1 確定 (T-M1.4 調査)
         # LayerNorm(dim, eps=1e-6)
         # ConvNeXt × n_blocks (cond optional)
         # LayerNorm(dim, eps=1e-6)
@@ -216,11 +216,11 @@ class WaveNextGenerator(nn.Module):
         return torch.clip(audio, -1.0, 1.0)  # (B, T_mel * hop_length)
 ```
 
-**Acceptance** (`tests/test_generator.py`):
-- [ ] GAN 設定 (input_channels=2176, hop=300, n_fft=2048): 入力 `(B, 2176, 80)` → 出力 `(B, 24000)`
-- [ ] Diff 設定 (input_channels=1152, hop=256, n_fft=1024): 入力 `(B, 1152, 94)` → 出力 `(B, 24064)`
-- [ ] 出力範囲が `[-1, 1]` に収まる (clip が機能)
-- [ ] パラメータ数: GAN 版 ≈ 14.99M, Diff 版 ≈ 14.42M (Table 1 と整合)
+**Acceptance** (`tests/test_generator.py`、2026-05-27 完了、18 件 pass):
+- [x] GAN 設定 (input_channels=2176, hop=300, n_fft=2048): 入力 `(B, 2176, 80)` → 出力 `(B, 24000)`
+- [x] Diff 設定 (input_channels=1152, hop=256, n_fft=1024): 入力 `(B, 1152, 94)` → 出力 `(B, 24064)`
+- [x] 出力範囲が `[-1, 1]` に収まる (clip が機能、`*1e6` でも飽和)
+- [x] パラメータ数: GAN **15.43M** (embed kernel=1、Table 1 14.99M +2.9% ✓)。Diff Generator 16.13M は per-block fc_t 過剰で Table 1 14.42M +14% → M1 phase review で fc_t 要否を再評価 (T-M1.4 §8.3)
 - [ ] 重み初期化: `Conv1d.weight.std() ≈ 0.02`, `Linear.bias` がゼロ
 
 ### M1.5 Noise embedding (`src/wavenext2/models/noise_embedding.py`) [Diff のみ]

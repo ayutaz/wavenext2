@@ -3,11 +3,11 @@ id: T-M1.4
 title: WaveNeXt-based Generator (Conv → LN → ConvNeXt×8 → Linear×2 → clip)
 milestone: M1
 phase: M1
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M1.1]
 blocks: [T-M1.6]
 related_docs:
@@ -522,9 +522,26 @@ def test_cond_mismatch_raises(gan_model, diff_model):
   - 出力が clip で頻繁に飽和して訓練が unstable な場合 → tanh / soft_clip への切替検討 (M5/M6)
   - メモリ消費が想定の 2 倍を超えた場合 → `linear_1` 周辺で `n_fft+2` の中間 tensor が問題、gradient checkpointing 導入
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `WaveNextGenerator` 実装、`tests/test_generator.py` 18 件 pass。GAN out (B,24000)、Diff out (B,24064)、clip [-1,1]、grad flow、cond 整合 ValueError、block_factory DI、final_activation tanh fallback。
+- `block_factory` / `final_activation="clip"|"tanh"` / `embed_kernel_size` を引数化 (ablation 容易性)。重み init は `self.modules()` walk で block 内部含め trunc_normal_(0.02)+bias0。
+
+**【重大調査: embed kernel size = 1 に確定】** (ユーザー指示「調査して最適に」):
+- architecture.md 構造図は embed kernel=7 だが、concat 入力 (GAN 2176ch) に kernel=7 だと embed 7.8M → sub-model ~22M。
+- arXiv HTML で Table 1 を確認: GAN 2 iter=**29.97M=2×14.985**, 5 iter=**74.93M=5×14.986**, WaveNeXt baseline=**14.98M**。→ GAN sub-model は厳密に 14.985M で baseline とほぼ同一。**22M は数学的に不可能**。
+- 内訳: ConvNeXt×8 (12.64M) + heads (1.67M) = 14.31M が大半 → embed には ~0.67M しか残らない。
+- **embed kernel=1** (1×1 射影 1.11M、GAN 計 **15.43M** = Table 1 +2.9%、±5% 内) を採用。concat 設計を尊重し、時間文脈は後段 block の depthwise k=7 が担う。architecture.md L34 を kernel=7→1 に修正。
+- 教訓: **構造図の kernel は参照実装 (Vocos の mel-only embed) からの慣性で誤って大入力に転写されがち。published param 数 (Table 1 の厳密倍数) で逆算検算すると設計の誤りを検出できる**。
+
+**【未解決・M1 phase review へ申し送り】 Diff の per-block fc_t 過剰**:
+- Diff Generator (per-block fc_t 8×0.263M=2.1M 含む) = 16.13M。+NoiseEmbedding 0.33M で sub-model 計 16.46M vs Table 1 **14.42M (+14%、±5% 外)**。
+- **fc_t を除くと Diff = 14.36M で Table 1 と一致** (-0.4%)。→ per-block conditioning (open-questions §C7 の FastDiff 解釈) が paper の実際の conditioning より重い可能性。T-M1.1 は commit 済のため、conditioning 機構の再評価は M1 phase review で holistic に判断する。
+
+次の似たタスクで応用できる教訓:
+- 派生モジュールの param 数は published Table の**厳密倍数構造**で検算する (29.97=2×, 74.93=5× が kernel=7 を即座に棄却した)。
+- 設計図と param 数が矛盾したら、変更しやすい側 (図の kernel) を疑い、hard number (Table) を信頼する。
 
 ## 9. 後続タスクへの連絡事項
 

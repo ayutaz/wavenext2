@@ -31,7 +31,7 @@ WaveNeXt 2 のコア部品は 2 つの **sub-model** の集合で、GAN-WaveNeXt
 Concat(Mel-spec [128 ch], STFT-spec [2F-2 ch])  ← shape: (B, C_in, T_mel)
   │  C_in = 128 + (2F-2)  ※ F = n_fft//2 + 1
   ▼
-Conv1d(in=C_in, out=512, kernel=7, padding=3, bias=True)
+Conv1d(in=C_in, out=512, kernel=1, padding=0, bias=True)   ← embed (kernel=1 確定、下記注記)
   │
   ▼ transpose to (B, T_mel, 512)
 LayerNorm(512, eps=1e-6)
@@ -54,6 +54,15 @@ torch.clip(x, min=-1.0, max=1.0)            ← tanh ではなく clip
   ▼
 Synthesized waveform (= ノイズ成分 n_{t-1})
 ```
+
+> **embed kernel size の確定 (T-M1.4 実装時調査, 2026-05-27)**: 当初この図は kernel=7 だったが、
+> concat 入力 (GAN 2176ch) に kernel=7 を適用すると embed だけで 7.8M、sub-model 計 ~22M となり、
+> Table 1 の GAN sub-model 14.99M (2 iter=29.97M=2×, 5 iter=74.93M=5× の**厳密倍数**) と矛盾する
+> (22M なら 2 iter=44M のはず)。ConvNeXt×8 (12.64M)+heads (1.67M)=14.31M が大半を占め embed には
+> ~0.67M しか残らない。**embed kernel=1** (1×1 channel 射影 = 1.11M、GAN 計 15.43M = Table 1 +2.9%) を
+> 採用。時間方向の文脈は後段 ConvNeXt block の depthwise kernel=7 が担うため kernel=1 で機能上問題なし。
+> **未解決の関連事項**: Diff sub-model は per-block fc_t (8×0.263M=2.1M) を含めると 16.46M で Table 1 の
+> 14.42M を +14% 超過 (fc_t 無しなら 14.36M で一致)。per-block conditioning の要否は要再検討 (M1 phase review)。
 
 ### 設計上の意図
 - **元 WaveNeXt の `linear_1` の出力次元 `n_fft+2` は Vocos の `ISTFTHead` の `Linear(dim → n_fft+2)` と一致**
