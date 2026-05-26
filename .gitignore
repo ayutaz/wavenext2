@@ -23,14 +23,16 @@ data/libritts_r/
 *.wav
 *.flac
 *.mp3
-# filelist は commit する (パスのみ)
-!data/filelists/*.txt
+# filelist / 統計は commit する (パスと統計のみ、wav 本体は上の *.wav で除外)
+# data/filelists/*.tsv, stats.json, audio_info.tsv は data/ が一括除外でないため既定で追跡される
 
 # =========================================================================
 # 学習成果物
 # =========================================================================
-checkpoints/
-logs/
+checkpoints/*
+!checkpoints/.gitkeep
+logs/*
+!logs/.gitkeep
 runs/
 wandb/
 tensorboard/
@@ -38,8 +40,6 @@ tensorboard/
 *.pth
 *.ckpt
 *.safetensors
-# pre-trained を残したい場合は明示的に track:
-# !checkpoints/.gitkeep
 
 # 後処理 (post-filter FIR)
 *.npy
@@ -76,8 +76,10 @@ venv/
 env/
 ENV/
 
-# テスト・カバレッジ
+# テスト・カバレッジ / lint キャッシュ
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
 .tox/
@@ -95,7 +97,15 @@ coverage.xml
 # =========================================================================
 eval_results/
 mos_test/
+mos_results/
 generated_samples/
+
+# =========================================================================
+# secrets / ローカル環境 (.env.example のみ commit)
+# =========================================================================
+.env
+.env.*
+!.env.example
 
 # =========================================================================
 # IDE / OS

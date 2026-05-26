@@ -1,0 +1,56 @@
+[project]
+name = "wavenext2"
+version = "0.0.1"
+description = "PyTorch reimplementation of WaveNeXt 2 (arXiv:2605.25506)"
+readme = "README.md"
+# 3.13.8 は torch 2.11 の JIT overload ソース解析が IndentationError で落ちる既知回帰のため、
+# 下限を 3.13.13 (検証で torch import が通る最初のパッチ) に設定。
+requires-python = ">=3.13.13,<3.14"
+license = "Apache-2.0"
+dependencies = [
+    "torch>=2.10",
+    "torchaudio>=2.10",
+    "numpy",
+    "scipy",
+    "librosa>=0.11.0",
+    "soundfile",
+    "pyyaml",
+    "tensorboard",
+    "matplotlib",
+    "tqdm",
+    "pyworld",
+    "einops",
+    # MCD ライブラリ (pymcd) は pysptk 経由で Windows cp313 に prebuilt wheel が無く
+    # MSVC ビルドを要求するため base 依存から除外。MCD 計算の実装方針は T-M4.1 で確定
+    # (pure-Python 実装 or mel-cepstral-distance)。log-F0 RMSE は pyworld で充足。
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.uv]
+# M0.1 時点では src/wavenext2 が未作成のため、プロジェクト自体はビルドしない
+# (環境管理のみ)。M0.2 (scaffold) で installable package へ切り替える。
+package = false
+# システム Python (Windows Store 版 / OS 同梱版) を排除し uv 管理版のみ使用。再現性担保。
+python-preference = "only-managed"
+
+# PyTorch CUDA wheel index。RTX 40 系 (Ada, sm_89) + driver 596.x は CUDA 13 まで対応。
+# 安定性重視で cu128 を採用。driver/GPU 交代時はこの URL を切り替える。
+# Apple Silicon (darwin) では index を使わず PyPI 版 (CPU/MPS) を解決する。
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]
+torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100

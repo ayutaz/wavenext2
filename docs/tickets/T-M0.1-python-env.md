@@ -3,11 +3,11 @@ id: T-M0.1
 title: Python 環境セットアップ (uv + Python 3.13)
 milestone: M0
 phase: M0
-status: pending
+status: completed
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: []
 blocks: [T-M0.2, T-M0.3]
 related_docs:
@@ -27,14 +27,14 @@ related_docs:
 WaveNeXt 2 再現実装プロジェクトの Python 実行環境を `uv` ベースで構築し、後続マイルストーン全体で再現性のある依存関係管理 (`pyproject.toml` + `uv.lock`) を確立する。
 
 ### ゴール
-完了したと判断できる具体的な状態:
-- [ ] `pyproject.toml` (`requires-python = ">=3.13,<3.14"`) と `uv.lock` がリポジトリにコミットされている
-- [ ] `.venv/` (Python 3.13.x) がローカルに生成され `.gitignore` で除外されている
-- [ ] `uv sync` が clean clone 状態から成功する (再現性確認)
-- [ ] `uv run python -c "import torch; print(torch.cuda.is_available())"` が `True` を返し、`torch.__version__ >= 2.10.0`
-- [ ] `uv run python -c "import torchaudio; print(torchaudio.list_audio_backends())"` で `sox_io` を含むリストが返る
-- [ ] `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` がエラーなく完走する
-- [ ] T-M0.2 / T-M0.3 が `uv run` 経由でスクリプトを実行できる状態が引き継がれる
+完了したと判断できる具体的な状態 (✅ = 2026-05-27 達成):
+- [x] `pyproject.toml` (`requires-python = ">=3.13.13,<3.14"`) と `uv.lock` がリポジトリにコミットされている
+- [x] `.venv/` (Python 3.13.13) がローカルに生成され `.gitignore` で除外されている
+- [x] `uv sync` が成功する (89 packages、再現性確認)
+- [x] `uv run python -c "import torch; print(torch.cuda.is_available())"` が `True`、`torch 2.11.0+cu128` (>= 2.10)、device = RTX 4070 Ti SUPER
+- [x] **(E4 改訂)** torchaudio 2.11 は backend dispatch (`list_audio_backends` / sox_io) を**廃止**したため当初の sox_io 検証は適用不可。代わりに **音声 I/O は `soundfile` に統一** (E6 で `import soundfile` 成功を確認)。詳細は §6.1 / §8.3 / §9.1 参照
+- [x] `uv run python -c "import pyworld, librosa; print(...)"` 完走 (pyworld 0.3.5 / librosa 0.11.0)
+- [x] T-M0.2 / T-M0.3 が `uv run` 経由でスクリプトを実行できる状態が引き継がれる
 
 ## 2. 実装内容の詳細
 
@@ -182,18 +182,18 @@ torchaudio = [{ index = "pytorch-cu126", marker = "sys_platform != 'darwin'" }]
 - [ ] **E1**: `uv sync` が `.venv/` と `uv.lock` を生成 (exit code 0)
 - [ ] **E2**: `uv run python --version` が `Python 3.13.x` を表示 (`x >= 0`)
 - [ ] **E3**: `uv run python -c "import torch; assert torch.__version__ >= '2.10', torch.__version__; assert torch.cuda.is_available(), 'CUDA not available'; print(torch.__version__, torch.cuda.is_available())"` が成功
-- [ ] **E4**: `uv run python -c "import torchaudio; backends = torchaudio.list_audio_backends(); assert 'sox_io' in backends, backends; print(backends)"` が成功
+- [x] **E4 (改訂)**: torchaudio **2.11** では `list_audio_backends` / `get_audio_backend` / `sox_effects` / `info` が**削除**され、`torchaudio.load` は TorchCodec 依存に変更された。よって sox_io 検証は obsolete。実態確認の結果、`torchaudio.functional.resample` と `torchaudio.transforms.MelSpectrogram` は健在。**音声 I/O は `soundfile` (E6) に統一**する方針に変更 (§8.3 / §9.1)
 - [ ] **E5**: `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` がエラーなく完走
 - [ ] **E6** (Windows 開発機): `uv run python -c "import soundfile; print(soundfile.__version__)"` がエラーなく完走 (libsndfile DLL の存在確認)。**Linux/Mac では skip 可能**。§6.1 の `soundfile` Windows DLL 問題リスクに対応
 
 GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_available()` のチェックを `os.environ.get("WAVENEXT2_SKIP_CUDA_CHECK")` でスキップ可能にする (将来の CI 用)。本チケットでは検証する開発機に CUDA GPU がある前提。
 
-### 5.3 Acceptance criteria (`docs/milestones.md` §M0.1 より転記)
-- [ ] `uv sync` が成功 → `.venv/` と `uv.lock` が生成
-- [ ] `uv run python --version` が `3.13.x` を表示
-- [ ] `uv run python -c "import torch; print(torch.cuda.is_available())"` で True (torch >= 2.10.0)
-- [ ] `uv run python -c "import torchaudio; print(torchaudio.list_audio_backends())"` で sox_io が含まれる (audio 正規化に必須)
-- [ ] `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` でエラーなし
+### 5.3 Acceptance criteria (`docs/milestones.md` §M0.1 より転記、torchaudio 2.11 で改訂)
+- [x] `uv sync` が成功 → `.venv/` と `uv.lock` が生成
+- [x] `uv run python --version` が `3.13.13` を表示
+- [x] `uv run python -c "import torch; print(torch.cuda.is_available())"` で True (torch 2.11.0+cu128 >= 2.10.0)
+- [x] ~~sox_io 検証~~ → **torchaudio 2.11 で廃止**。音声 I/O は `soundfile` (libsndfile 1.2.2) に統一 (E4/E6 参照)
+- [x] `uv run python -c "import pyworld, librosa; print(...)"` でエラーなし
 
 ## 6. 懸念事項
 
@@ -265,9 +265,17 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
 - **乱数 seed 集約方針**: 本チケットでは予約のみ。`src/utils/seed.py` を T-M0.2 で空 stub 配置し、M1 以降で PyTorch / numpy / random / CUDA (cuda manual seed, cudnn deterministic) の seed を一括設定する設計を予告する。`set_seed(seed: int, deterministic: bool = False)` のような API を想定。
 - **`[tool.uv] python-preference = "only-managed"`**: システム Python (Windows Store 版 / brew 版 / OS 同梱版) を排除し、uv が管理する Python のみを使う設定。再現性を担保するため **本チケットの `pyproject.toml` で明示**する。**判断**: 採用。`uv venv --python 3.13` の自動 Python ダウンロードと組み合わせれば、開発機ごとに微妙に異なる Python ビルドを排除できる。
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装中に判明した想定外:
+1. **Python 3.13.8 + torch 2.11 の import 不能 (CPython 回帰)**: uv 管理の 3.13.8 では `import torch` が `torch._jit_internal._check_overload_body` → `ast.parse` で `IndentationError` を起こし import 自体が失敗。これは decorated overload のソース行番号属性に関する CPython 3.13.8 固有の回帰で、**3.13.13 で解消**。対応として `requires-python` 下限を `>=3.13.13` に引き上げ、`.python-version` を `3.13.13` に固定。→ **教訓: cp3.13 系は patch レベルで torch 互換性が割れる。下限を「動作確認済みの最小 patch」に固定すべき**。
+2. **pymcd (→ pysptk) が Windows cp313 でビルド不能**: prebuilt wheel が無く MSVC を要求。§6.1 の予見どおり。base 依存から除外し、MCD 実装方針は T-M4.1 に委譲 (pure-Python or mel-cepstral-distance)。pyworld は cp313 wheel があり問題なし。→ **教訓: Cython 拡張をもつ eval-only 依存は core env に混ぜない。M4 で隔離するか pure-Python 代替を選ぶ**。
+3. **torchaudio 2.11 で I/O API が刷新**: `list_audio_backends` / `get_audio_backend` / `sox_effects` / `info` が削除、`load` は TorchCodec 依存に。`functional.resample` と `transforms.MelSpectrogram` は健在。→ **当初設計 (Vocos sox `norm` = `torchaudio.sox_effects.apply_effects_tensor`) は実行不能**。ただし sox `norm -X dB` は「peak を -X dBFS に正規化」するだけなので `gain = 10**(target_dbfs/20) / peak` の手動 peak 正規化と**数値的に等価**。音声 I/O は `soundfile` に統一する方針へ変更 (§9.1、下流チケットへ申し送り)。→ **教訓: sox は Windows では元々動かず、torchaudio も sunset 方向。peak 正規化を自前実装する方が再現性・移植性ともに優る**。
+4. **license は Apache-2.0**: チケット雛形は `MIT` だったがリポジトリ ROOT の `LICENSE` は Apache-2.0。`pyproject.toml` は SPDX 式 `license = "Apache-2.0"` で整合させた。
+
+次の似たタスクで応用できる教訓:
+- **`uv lock` を `uv sync` の前に必ず走らせる**: 解決 (22s) と DL (数分) を分離でき、version/index/ビルド不能を DL 前に検知できる。
+- **`package = false` で chicken-egg 回避**: M0.1 時点では `src/wavenext2` が無いため、プロジェクト自体をビルド対象にせず env 管理のみにする。M0.2 で installable へ切替。
 
 ## 9. 後続タスクへの連絡事項
 
@@ -279,6 +287,13 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
   - torch: >= 2.10 (cp313 wheel)
   - CUDA: cu126 暫定 (環境次第で `[tool.uv.sources]` を差し替え)
 - **依存追加方法**: 後続チケットで追加ライブラリが必要な場合は `uv add <package>` を実行 → `pyproject.toml` + `uv.lock` が更新されるので diff を commit に含める。`pip install` 直叩きは禁止。
+
+- **【重要・全 audio 系チケットへ申し送り】torchaudio 2.11 で I/O API が刷新された**:
+  - 削除: `torchaudio.list_audio_backends` / `get_audio_backend` / `sox_effects` / `info`。`torchaudio.load` は TorchCodec 依存 (未インストール環境では ImportError)。
+  - 健在: `torchaudio.functional.resample`, `torchaudio.transforms.MelSpectrogram`, `torchaudio.save`。
+  - **決定**: 音声の読み書き・info は **`soundfile` に統一** (cross-platform、TorchCodec 不要)。リサンプルが要る場合のみ `torchaudio.functional.resample` か `librosa.resample`。
+  - **sox `norm` の代替**: `torchaudio.sox_effects` は使えないが、sox `norm -X dB` は peak 正規化なので `gain = 10**(target_dbfs/20) / wav.abs().max(); wav = wav * gain` で**数値等価に自前実装**する。train: peak U(-6,-1) dBFS、val/test: peak -3 dBFS は不変。
+  - **影響チケット (実装時に sox→peak-norm へ書き換え)**: T-M0.3 (acceptance の `torchaudio.load`→`soundfile`)、T-M2.1 (本体、`docs/training.md`/`architecture.md`/`open-questions.md`/`implementation-plan.md` の sox 記述も同時に改訂)、T-M3.4、T-M4.1、T-M7.1。本 M0.1 では env 確定のみ、各 docs の sox 記述書き換えは該当フェーズで実施。
 - **注意事項**:
   - `.venv/` は OS 依存のためマシン間で共有しない。必ず `uv sync` で再生成する
   - PyTorch CUDA wheel index は `[tool.uv.sources]` で切り替える。開発機交代時に CUDA driver version が変わったら本チケットを再開して `[[tool.uv.index]]` を更新

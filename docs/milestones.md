@@ -58,19 +58,19 @@ pyyaml             # config 管理
 tensorboard        # ログ
 matplotlib         # 波形・mel 可視化
 tqdm
-pymcd              # eval 用
-pyworld            # log F0 RMSE 用
+                   # pymcd は Windows cp313 でビルド不能 (pysptk が MSVC 要求) のため除外。MCD は T-M4.1 で確定
+pyworld            # log F0 RMSE 用 (cp313 wheel あり)
 einops             # tensor reshape 用 (任意)
 ```
 
-**Acceptance** (Claude Code が Bash で実行確認):
-- [ ] `uv sync` が成功 → `.venv/` と `uv.lock` が生成
-- [ ] `uv run python --version` が `3.13.x` を表示
-- [ ] `uv run python -c "import torch; print(torch.cuda.is_available())"` で True (torch >= 2.10.0)
-- [ ] `uv run python -c "import torchaudio; print(torchaudio.list_audio_backends())"` で sox_io が含まれる (audio 正規化に必須)
-- [ ] `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` でエラーなし
+**Acceptance** (Claude Code が Bash で実行確認、2026-05-27 完了):
+- [x] `uv sync` が成功 → `.venv/` と `uv.lock` が生成 (89 packages)
+- [x] `uv run python --version` が `3.13.13` を表示 (3.13.8 は torch 2.11 import 不能の回帰のため下限 `>=3.13.13`)
+- [x] `uv run python -c "import torch; print(torch.cuda.is_available())"` で True (torch 2.11.0+cu128 >= 2.10.0、RTX 4070 Ti SUPER)
+- [x] ~~torchaudio `list_audio_backends` に sox_io~~ → **torchaudio 2.11 で backend dispatch / sox_effects / info が廃止**。音声 I/O は `soundfile` (1.2.2) に統一。sox `norm` は手動 peak 正規化で数値等価に再実装 (T-M0.1 §8.3 / §9.1 参照)
+- [x] `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` でエラーなし (pyworld 0.3.5 / librosa 0.11.0)
 
-**ユーザー操作**: 不要 (Claude Code が `uv venv --python 3.13` → `uv sync` まで実施)。ただし CUDA 環境構築 (NVIDIA driver / CUDA toolkit インストール) が必要なら `! nvidia-smi` で診断結果をもとにユーザーに指示を仰ぐ。uv 未インストール環境では `winget install astral-sh.uv -e` (Windows) / `curl -LsSf https://astral.sh/uv/install.sh | sh` (Unix) を案内する。
+**ユーザー操作**: 不要 (Claude Code が `uv venv --python 3.13.13` → `uv sync` まで実施)。CUDA は driver 596.21 で cu128 wheel が動作 (CUDA toolkit の別途インストールは不要、wheel 同梱ランタイムで充足)。
 
 ### M0.2 ディレクトリ scaffold
 **チケット**: [T-M0.2](tickets/T-M0.2-scaffold.md)
