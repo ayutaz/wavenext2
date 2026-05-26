@@ -319,11 +319,11 @@ class LibriTTSRDataset(Dataset):
 - `feature_matching.py`: L1 FM loss
 - `stft_loss.py`: Multi-resolution STFT (SC + Mag L1, eps=1e-5)
 
-**Acceptance**:
-- [ ] hinge GAN: `D_loss = relu(1 - D(real)).mean() + relu(1 + D(fake)).mean()`
-- [ ] FM: 3 sub-D × 7 layer の全中間特徴の L1 平均
-- [ ] MR-STFT: 3 resolution `[512,1024,2048]` × `[360,900,1800]` × `[80,150,300]`、各 SC + Mag L1
-- [ ] 重み: D-GAN=1.0, D-FM=10.0, MRSTFT-SC=2.5, MRSTFT-Mag=2.5
+**Acceptance** (`tests/test_losses.py`、2026-05-27 完了、15 件 pass):
+- [x] hinge GAN: `D_loss = relu(1 - D(real)).mean() + relu(1 + D(fake)).mean()` (sub-D 平均)、`G_loss = -D(fake).mean()`
+- [x] FM: 3 sub-D × 6 layer の全中間特徴の L1 平均 (real 側 detach)
+- [x] MR-STFT: 3 resolution `[512,1024,2048]` × `[360,900,1800]` × `[80,150,300]`、各 SC + log-mag L1、eps=1e-5
+- [x] 重み: D-GAN=1.0, D-FM=10.0, MRSTFT-SC=2.5, MRSTFT-Mag=2.5 (`compute_total_loss`、sorted 加算順、unweighted dict 返し)
 
 ### M2.4 GAN モデル (`src/wavenext2/models/gan_wavenext2.py`)
 **チケット**: [T-M2.4](tickets/T-M2.4-gan-model.md)

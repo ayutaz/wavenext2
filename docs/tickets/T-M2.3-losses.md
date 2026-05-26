@@ -3,11 +3,11 @@ id: T-M2.3
 title: Loss 関数 (Hinge GAN + FM L1 + MR-STFT)
 milestone: M2
 phase: M2
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.2]
 blocks: [T-M2.5]
 related_docs:
@@ -754,10 +754,21 @@ def compute_total_loss(
   - 案: `class LossLike(Protocol): def forward(self, *args) -> torch.Tensor: ...`
   - 採否: **保留** (M2.5 / M3.2 で実際に共通インターフェースが必要になったら導入)
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `HingeGANLoss` (d_loss/g_loss、sub-D 平均)、`FeatureMatchingLoss` (real 側 detach)、`MultiResolutionSTFTLoss` (SC + log-mag L1、3 解像度)、`compute_total_loss` ((total, unweighted dict)、sorted 加算順、DEFAULT_WEIGHTS) を実装。`tests/test_losses.py` 15 件 pass。
+- チケット §2.2 のドラフトがほぼ正確だったため忠実に実装 (d_loss at 0 → 2.0、FM identical → 0、MR-STFT identical → ~0 を検証)。
+
+実装上の判断:
+1. **FM loss は real 側を detach** (HiFi-GAN/WaveFit 標準: real は target)。`test_fm_detaches_real_side` で real.grad is None / fake.grad not None を検証。
+2. **loss の初期化に `tensor.new_zeros(())`** を使い、device/dtype を入力に追従させた (float `0.0` 開始だと CPU scalar 混入の懸念)。
+3. **`compute_total_loss` は `sorted(losses)` で加算順固定** (bf16 の float 加算非可換による M6 再現性破壊を防止)。unweighted は `.item()` 済み float (graph 非保持)。
+4. discriminator の `SubDiscOutput` から loss へは呼び出し側 (T-M2.5) が `[o.logits ...]` / `[o.features ...]` を抽出して渡す (loss API は list 受けで D 構造非依存)。
+
+次の似たタスクで応用できる教訓:
+- 勾配方向の sanity (D(real)↑ → d_loss↓ つまり ∂loss/∂d_real<0) は loss の正しさを値非依存で検証でき強力。
+- 集約ヘルパは加算順を明示固定しておくと後の bf16/分散学習で再現性問題を未然に防げる。
 
 ## 9. 後続タスクへの連絡事項
 
