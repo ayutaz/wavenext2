@@ -38,7 +38,14 @@ M0 (環境整備) ─► M1 (コア部品) ┬─► M2 (GAN)  ─┐
 ## M0: 環境整備とデータ準備 (作業量: small)
 
 ### M0.1 Python 環境
-**Deliverable**: `pyproject.toml` または `requirements.txt`
+**チケット**: [T-M0.1](tickets/T-M0.1-python-env.md)
+
+**Deliverable**: `pyproject.toml` (uv 管理) + `uv.lock`
+
+- 管理ツール: [uv](https://docs.astral.sh/uv/) (`pip` / `poetry` / `conda` は使わない)
+- Python: **3.13** を採用。論文に Python バージョン指定はない。依存ライブラリ調査の結果、最新の 3.14 では `pyworld` 本家が cp314 wheel を提供せず (Cython build が必要)、`librosa` 0.11.0 の PyPI classifier も 3.13 までしか明示していないため、全依存が公式 wheel で揃う 3.13 を採用。将来 pyworld 等が cp314 wheel を出した時点で 3.14 へのアップグレードを検討する。
+- `pyproject.toml` の `requires-python = ">=3.13,<3.14"`
+- 主な依存:
 
 ```
 torch >= 2.1
@@ -57,12 +64,17 @@ einops             # tensor reshape 用 (任意)
 ```
 
 **Acceptance** (Claude Code が Bash で実行確認):
-- [ ] `python -c "import torch; print(torch.cuda.is_available())"` で True
-- [ ] `python -c "import torchaudio; print(torchaudio.list_audio_backends())"` で sox_io が含まれる (audio 正規化に必須)
+- [ ] `uv sync` が成功 → `.venv/` と `uv.lock` が生成
+- [ ] `uv run python --version` が `3.13.x` を表示
+- [ ] `uv run python -c "import torch; print(torch.cuda.is_available())"` で True (torch >= 2.10.0)
+- [ ] `uv run python -c "import torchaudio; print(torchaudio.list_audio_backends())"` で sox_io が含まれる (audio 正規化に必須)
+- [ ] `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` でエラーなし
 
-**ユーザー操作**: 不要 (Claude Code が `pip install -r requirements.txt` まで実施)。ただし CUDA 環境構築 (NVIDIA driver / CUDA toolkit インストール) が必要なら `! nvidia-smi` で診断結果をもとにユーザーに指示を仰ぐ。
+**ユーザー操作**: 不要 (Claude Code が `uv venv --python 3.13` → `uv sync` まで実施)。ただし CUDA 環境構築 (NVIDIA driver / CUDA toolkit インストール) が必要なら `! nvidia-smi` で診断結果をもとにユーザーに指示を仰ぐ。uv 未インストール環境では `winget install astral-sh.uv -e` (Windows) / `curl -LsSf https://astral.sh/uv/install.sh | sh` (Unix) を案内する。
 
 ### M0.2 ディレクトリ scaffold
+**チケット**: [T-M0.2](tickets/T-M0.2-scaffold.md)
+
 **Deliverable**: `src/`, `configs/`, `tests/`, `scripts/`, `checkpoints/`, `logs/` の作成
 
 ```bash
@@ -87,6 +99,8 @@ scripts/{prepare_libritts.py, extract_mel.py, fit_post_filter.py}
 **ユーザー操作**: 不要。
 
 ### M0.3 LibriTTS-R 取得
+**チケット**: [T-M0.3](tickets/T-M0.3-libritts-r.md)
+
 **Deliverable**: `scripts/prepare_libritts.py` (24 kHz 確認、必要なら resample、wav リストを生成)
 
 - "train-clean-100" + "train-clean-360" + "test-clean" をローカル展開
@@ -110,6 +124,8 @@ scripts/{prepare_libritts.py, extract_mel.py, fit_post_filter.py}
 ## M1: コア部品 (sub-model の構成要素) (作業量: large、6 サブタスク)
 
 ### M1.1 ConvNeXt block (`src/models/convnext.py`)
+**チケット**: [T-M1.1](tickets/T-M1.1-convnext-block.md)
+
 **Deliverable**: GAN/Diff 両対応の `ConvNeXtBlock` クラス
 
 ```python
@@ -132,6 +148,8 @@ class ConvNeXtBlock(nn.Module):
 - [ ] gradient flow 確認: `loss = block(x).sum(); loss.backward()` で全パラメータに grad
 
 ### M1.2 STFT module (`src/models/stft.py`)
+**チケット**: [T-M1.2](tickets/T-M1.2-stft-module.md)
+
 **Deliverable**: 波形 → STFT-spec (2F-2 ch) の変換モジュール
 
 ```python
@@ -151,6 +169,8 @@ class STFTModule(nn.Module):
 - [ ] 単純な正弦波で round-trip テスト: STFT → 期待される周波数 bin にエネルギー集中
 
 ### M1.3 Mel-spectrogram 抽出 (`src/data/mel.py`)
+**チケット**: [T-M1.3](tickets/T-M1.3-mel-spectrogram.md)
+
 **Deliverable**: `MelSpectrogram` クラス
 
 ```python
@@ -169,6 +189,8 @@ class LogMelSpectrogram(nn.Module):
 - [ ] 出力範囲が `[log(1e-5), log(max)]` ≈ `[-11.5, ?]` に収まる
 
 ### M1.4 Generator (`src/models/generator.py`)
+**チケット**: [T-M1.4](tickets/T-M1.4-generator.md)
+
 **Deliverable**: WaveNeXt-based generator
 
 ```python
@@ -197,6 +219,8 @@ class WaveNextGenerator(nn.Module):
 - [ ] 重み初期化: `Conv1d.weight.std() ≈ 0.02`, `Linear.bias` がゼロ
 
 ### M1.5 Noise embedding (`src/models/noise_embedding.py`) [Diff のみ]
+**チケット**: [T-M1.5](tickets/T-M1.5-noise-embedding.md)
+
 **Deliverable**: sinusoidal + FC×2 SiLU の noise level embedding
 
 ```python
@@ -218,6 +242,8 @@ class NoiseEmbedding(nn.Module):
 - [ ] freq の log-spaced 確認: `freq[0] / freq[-1] ≈ 10000` (= `log(10000)` スケール)
 
 ### M1.6 Sub-model wrapper (`src/models/sub_model.py`)
+**チケット**: [T-M1.6](tickets/T-M1.6-sub-model.md)
+
 **Deliverable**: `SubModelGAN` と `SubModelDiff`
 
 ```python
@@ -250,6 +276,8 @@ class SubModelDiff(nn.Module):
 ## M2: GAN-WaveNeXt 2 (作業量: large、6 サブタスク)
 
 ### M2.1 Dataset (`src/data/dataset.py`)
+**チケット**: [T-M2.1](tickets/T-M2.1-dataset.md)
+
 **Deliverable**: LibriTTS-R loader + sox `norm` 正規化
 
 ```python
@@ -269,6 +297,8 @@ class LibriTTSRDataset(Dataset):
 - [ ] mel と audio の時間長整合: `audio.shape[0] == mel.shape[1] * hop_length`
 
 ### M2.2 Discriminator (`src/models/discriminator.py`)
+**チケット**: [T-M2.2](tickets/T-M2.2-discriminator.md)
+
 **Deliverable**: MSD × 3 (WaveFit-PT 完全準拠、MPD なし)
 
 **Acceptance**:
@@ -277,6 +307,8 @@ class LibriTTSRDataset(Dataset):
 - [ ] AvgPool1d で隣接 sub-discriminator 間 downsample
 
 ### M2.3 Loss 関数 (`src/losses/`)
+**チケット**: [T-M2.3](tickets/T-M2.3-losses.md)
+
 **Deliverable**:
 - `adversarial.py`: hinge GAN loss (`HingeGANLoss`)
 - `feature_matching.py`: L1 FM loss
@@ -289,6 +321,8 @@ class LibriTTSRDataset(Dataset):
 - [ ] 重み: D-GAN=1.0, D-FM=10.0, MRSTFT-SC=2.5, MRSTFT-Mag=2.5
 
 ### M2.4 GAN モデル (`src/models/gan_wavenext2.py`)
+**チケット**: [T-M2.4](tickets/T-M2.4-gan-model.md)
+
 **Deliverable**: T 個の sub-model を直列に並べた fixed-point iteration generator
 
 ```python
@@ -309,6 +343,8 @@ class GANWaveNext2(nn.Module):
 - [ ] T=1 で `y_0 = -sub_model(mel, zeros)`、つまり generator が直接波形を出力する形になっていることを確認
 
 ### M2.5 Training script (`src/train/train_gan.py`)
+**チケット**: [T-M2.5](tickets/T-M2.5-train-gan.md)
+
 **Deliverable**: AdamW + InverseLR + hinge GAN の交互更新ループ
 
 ```python
@@ -325,6 +361,8 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 - [ ] TensorBoard に loss / 各 sub-loss / sample audio が記録される
 
 ### M2.6 Smoke training (overfitting test)
+**チケット**: [T-M2.6](tickets/T-M2.6-gan-smoke.md)
+
 **Deliverable**: 1 サンプルだけで 1000 step 訓練して loss が下がることを確認
 
 **Acceptance**:
@@ -336,6 +374,8 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 ## M3: Diff-WaveNeXt 2 (作業量: large、5 サブタスク)
 
 ### M3.1 Diff モデル (`src/models/diff_wavenext2.py`)
+**チケット**: [T-M3.1](tickets/T-M3.1-diff-model.md)
+
 **Deliverable**: 4 sub-model を独立に扱える wrapper + point-specialized partition
 
 ```python
@@ -360,6 +400,8 @@ class DiffWaveNext2(nn.Module):
 - [ ] パラメータ総数 = 4 × 14.42M ≈ 57.68M (Table 1)
 
 ### M3.2 Training script (`src/train/train_diff.py`)
+**チケット**: [T-M3.2](tickets/T-M3.2-train-diff.md)
+
 **Deliverable**: 各 sub-model を独立に MSE loss で訓練
 
 ```python
@@ -374,6 +416,8 @@ class DiffWaveNext2(nn.Module):
 - [ ] 4 つの sub-model それぞれ独立に checkpoint 保存
 
 ### M3.3 Reverse sampler (`src/inference/infer_diff.py`)
+**チケット**: [T-M3.3](tickets/T-M3.3-reverse-sampler.md)
+
 **Deliverable**: DDPM 標準形 4-step sampling + 1-to-1 dispatch
 
 ```python
@@ -395,6 +439,8 @@ def reverse_sample(model, mel, T=4):
 - [ ] 同じ mel + 同じ seed で deterministic
 
 ### M3.4 Post-filter (`src/inference/post_filter.py` + `scripts/fit_post_filter.py`)
+**チケット**: [T-M3.4](tickets/T-M3.4-post-filter.md)
+
 **Deliverable**: time-invariant spectral enhancement FIR の fit と apply
 
 ```python
@@ -415,6 +461,8 @@ def apply_post_filter(audio, fir):
 - [ ] apply 前後で音声長が変わらない (`mode="same"`)
 
 ### M3.5 Smoke training
+**チケット**: [T-M3.5](tickets/T-M3.5-diff-smoke.md)
+
 **Deliverable**: sub-model 1 のみで 1000 step 訓練 + 過学習テスト
 
 **Acceptance**:
@@ -426,6 +474,8 @@ def apply_post_filter(audio, fir):
 ## M4: 評価インフラ (作業量: medium、3 サブタスク)
 
 ### M4.1 客観評価スクリプト (`src/eval/compute_metrics.py`)
+**チケット**: [T-M4.1](tickets/T-M4.1-objective-metrics.md)
+
 **Deliverable**: MCD, log F0 RMSE の自動計算
 
 ```python
@@ -440,6 +490,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 - [ ] LibriTTS-R test-clean-100 全 4824 utterance を 1 GPU で 30 分以内に処理
 
 ### M4.2 UTMOS / NISQA 連携
+**チケット**: [T-M4.2](tickets/T-M4.2-utmos-nisqa.md)
+
 **Deliverable**: `src/eval/run_utmos.py`, `src/eval/run_nisqa.py`
 
 - UTMOS: https://github.com/sarulab-speech/UTMOS22 を git submodule
@@ -449,6 +501,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 - [ ] GT 音声で UTMOS ≈ 4.0±0.2, NISQA ≈ 4.5±0.3 (LibriTTS-R は高品質なため)
 
 ### M4.3 RTF 測定 (`src/eval/measure_rtf.py`)
+**チケット**: [T-M4.3](tickets/T-M4.3-rtf.md)
+
 **Deliverable**: GPU (A100) と CPU (1 core) での RTF 計測
 
 **Acceptance**:
@@ -460,6 +514,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 ## M5: 統合スモークテスト (作業量: small、wall-clock は GPU 数時間)
 
 ### M5.1 1 epoch 訓練
+**チケット**: [T-M5.1](tickets/T-M5.1-gan-1epoch.md)
+
 **Deliverable**: GAN-WaveNeXt 2 を train-clean-100 で 1 epoch (約 33k step) 訓練
 
 **Acceptance**:
@@ -468,6 +524,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 - [ ] 生成音声の聴感: 明らかな破綻なし (ノイズだらけ・全部 0 ではない)
 
 ### M5.2 Diff-WaveNeXt 2 1 sub-model 1 epoch
+**チケット**: [T-M5.2](tickets/T-M5.2-diff-1epoch.md)
+
 **Deliverable**: sub-model 1 を train-clean-100 で 1 epoch 訓練
 
 **Acceptance**:
@@ -479,6 +537,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 ## M6: 本格訓練 (Claude Code は起動・監視のみ、wall-clock: A100 で約 442 時間)
 
 ### M6.1 GAN-WaveNeXt 2 フル訓練
+**チケット**: [T-M6.1](tickets/T-M6.1-gan-full-training.md)
+
 **Deliverable**: A100 単体で約 410 時間訓練 → `checkpoints/gan/best.pt`
 
 **Acceptance**:
@@ -499,6 +559,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 3. Claude Code がそこから訓練を起動できるよう接続設定を済ませる
 
 ### M6.2 Diff-WaveNeXt 2 4 sub-model 訓練
+**チケット**: [T-M6.2](tickets/T-M6.2-diff-full-training.md)
+
 **Deliverable**: 各 sub-model を 1M step、合計約 32 時間 → `checkpoints/diff/sub_{1,2,3,4}.pt`
 
 **Acceptance**:
@@ -514,6 +576,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 **ユーザー操作**: M6.1 と同様 (GPU リソース確保のみ)。
 
 ### M6.3 Ablation (任意)
+**チケット**: [T-M6.3](tickets/T-M6.3-ablation.md)
+
 **Deliverable**: 比較表 + プロット
 - T=2,3,4,5 (GAN), with/without post-filter (Diff), with/without sub-modeling (Diff)
 - 論文 Table 1〜3 の trend を再現
@@ -525,6 +589,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):
 ## M7: 主観評価 (任意、人間が必須、Claude Code は集計のみ)
 
 ### M7.1 内部 MOS テスト
+**チケット**: [T-M7.1](tickets/T-M7.1-mos-test.md)
+
 - 20 utterances × 6 models = 120 sample
 - 内部・少人数 (5〜10名) で評価
 - 論文 MOS と相関を確認

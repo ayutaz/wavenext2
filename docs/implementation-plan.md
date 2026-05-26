@@ -4,14 +4,18 @@
 
 ## 1. 依存スタック (推奨)
 
-| 用途 | ライブラリ |
+| 用途 | ライブラリ / ツール |
 |---|---|
-| 深層学習 | PyTorch 2.x |
+| パッケージ管理 / 実行 | [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`) |
+| Python バージョン | 3.13 (論文指定なし、依存ライブラリ調査の結果 3.14 では pyworld 本家が cp314 wheel 未提供) |
+| 深層学習 | PyTorch >= 2.10 (cp313 wheel 提供開始版) |
 | 音声 I/O | torchaudio, soundfile |
 | 信号処理 | librosa (mel/STFT は torchaudio で代替可) |
 | ロガー | tensorboard / wandb |
 | 設定管理 | hydra or yaml (任意) |
 | データ | LibriTTS-R (huggingface or 公式 mirror) |
+
+すべての Python スクリプト実行は `uv run python ...` 経由とする (`pip install` や global Python に依存しない)。
 
 ## 2. 参考にする既存実装
 
@@ -69,7 +73,11 @@ wavenext2/
 ## 4. 実装フェーズ
 
 ### Phase 0: 環境準備
-- [ ] PyTorch + torchaudio 環境構築
+- [ ] uv インストール確認 (`uv --version`)、未導入なら winget / curl で導入
+- [ ] `uv venv --python 3.13` で仮想環境作成
+- [ ] `pyproject.toml` 作成 (`requires-python = ">=3.13,<3.14"`) + `uv add "torch>=2.10" torchaudio numpy scipy librosa soundfile pyyaml tensorboard matplotlib tqdm pymcd pyworld einops`
+- [ ] `uv sync` で依存固定 (`uv.lock` を commit)
+- [ ] `uv run python -c "import torch; print(torch.cuda.is_available())"` で CUDA 動作確認
 - [ ] LibriTTS-R "train-clean-100" + "train-clean-360" + "test-clean" ダウンロード
 - [ ] 24kHz リサンプリング確認
 - [ ] mel 抽出 (n_mels=128, hop=300 と hop=256 の両方)

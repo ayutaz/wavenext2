@@ -33,12 +33,21 @@ WaveNeXt 2 は ConvNeXt-based generator を **GAN ベースと Diffusion ベー�
 
 ### Python 環境
 
+本プロジェクトは [uv](https://docs.astral.sh/uv/) で依存・実行環境を管理する。Python は **3.13** を採用 (論文に Python バージョン指定なし、依存ライブラリ調査の結果 3.13 が全公式 wheel 完備の最新版)。
+
 ```bash
-# 推奨: Python 3.10+
-pip install -r requirements.txt   # ※ M0.1 で作成予定
+# uv インストール (未導入時)
+#   Windows: winget install --id=astral-sh.uv -e
+#   macOS / Linux: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 依存セットアップ (pyproject.toml + uv.lock から復元、M0.1 で作成)
+uv sync
+
+# バージョン確認
+uv run python --version    # Python 3.13.x
 ```
 
-依存: PyTorch 2.x, torchaudio, librosa, soundfile, pymcd, pyworld 等。
+依存: PyTorch >= 2.10 (Python 3.13 対応版), torchaudio, librosa, soundfile, pymcd, pyworld 等。
 
 ### データセット
 
@@ -56,19 +65,19 @@ LibriTTS-R は本リポジトリには **含まれない** (約 50 GB)。
 
 ```bash
 # GAN-WaveNeXt 2
-python -m src.train.train_gan --config configs/gan_wavenext2.yaml
+uv run python -m src.train.train_gan --config configs/gan_wavenext2.yaml
 
 # Diff-WaveNeXt 2 (4 sub-models を順次)
 for k in 1 2 3 4; do
-    python -m src.train.train_diff --config configs/diff_wavenext2.yaml --sub-model $k
+    uv run python -m src.train.train_diff --config configs/diff_wavenext2.yaml --sub-model $k
 done
 ```
 
 ### 推論
 
 ```bash
-python -m src.inference.infer_gan --ckpt checkpoints/gan/best.pt --mel path/to/mel.npy --out output.wav
-python -m src.inference.infer_diff --ckpt-dir checkpoints/diff/ --mel path/to/mel.npy --out output.wav
+uv run python -m src.inference.infer_gan --ckpt checkpoints/gan/best.pt --mel path/to/mel.npy --out output.wav
+uv run python -m src.inference.infer_diff --ckpt-dir checkpoints/diff/ --mel path/to/mel.npy --out output.wav
 ```
 
 ## 参考実装
