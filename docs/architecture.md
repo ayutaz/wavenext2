@@ -455,27 +455,24 @@ log_mel = torch.log(torch.clamp(mel, min=1e-5))  # 自然対数, eps=1e-5
 
 LibriTTS-R 24kHz 波形に対して以下の正規化を適用 [Vocos `vocos/dataset.py` L42-43]:
 
+> **実装は peak 正規化で再構成 (T-M2.1, 2026-05-27)**: torchaudio 2.11 で `sox_effects` 削除のため
+> 下記 sox は使えない。`gain = 10**(target_dbfs/20) / audio.abs().max(); audio *= gain` で数値等価に
+> 自前実装 (`src/wavenext2/data/dataset.py::_peak_normalize`)、I/O は soundfile。意味は不変。下記は原典記録。
+
 ```python
-import torchaudio
+# 原典 (Vocos)。torchaudio 2.11 では sox_effects 不可 → peak 正規化で再実装。
 import numpy as np
 
-# 訓練時 (random gain augmentation)
-gain_db = np.random.uniform(-1, -6)
+gain_db = np.random.uniform(-1, -6)  # 訓練時
 audio_norm, _ = torchaudio.sox_effects.apply_effects_tensor(
-    audio, sample_rate=24000,
-    effects=[["norm", f"{gain_db:.2f}"]]
+    audio, sample_rate=24000, effects=[["norm", f"{gain_db:.2f}"]]
 )
-
-# 検証/推論時 (fixed gain)
-audio_norm, _ = torchaudio.sox_effects.apply_effects_tensor(
-    audio, sample_rate=24000,
-    effects=[["norm", "-3.0"]]
-)
+# 検証/推論時は gain_db=-3.0 固定
 ```
 
 - データ型: `float32`, 範囲 `[-1, 1]`
 - モノラル化: stereo の場合は `audio.mean(dim=0)` (Vocos と同じ)
-- LUFS 正規化や peak clip は不要 (sox `norm` が peak-based 正規化を兼ねる)
+- LUFS 正規化や peak clip は不要 (peak-based 正規化のため)
 
 ## 7. ハイパーパラメータまとめ
 

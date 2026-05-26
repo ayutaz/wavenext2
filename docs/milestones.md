@@ -283,23 +283,23 @@ class SubModelDiff(nn.Module):
 ### M2.1 Dataset (`src/wavenext2/data/dataset.py`)
 **チケット**: [T-M2.1](tickets/T-M2.1-dataset.md)
 
-**Deliverable**: LibriTTS-R loader + sox `norm` 正規化
+**Deliverable**: LibriTTS-R loader + **peak 正規化** (sox `norm` と数値等価、soundfile I/O)
 
 ```python
 class LibriTTSRDataset(Dataset):
-    def __init__(self, filelist, segment_length=16384, mode="train"):
-        # mode: "train" → random gain U(-6, -1) dB, "val" → -3 dB
+    def __init__(self, filelist_path, root_dir, segment_length, hop_length, mel_cfg,
+                 mode="train", seed=None, return_mel=True):
+        # mode: "train" → peak U(-6, -1) dBFS, "val" → -3 dBFS
         ...
-    def __getitem__(self, idx):
-        # → (mel: (128, T_mel), audio: (segment_length,))
+    def __getitem__(self, idx) -> Batch:  # {"mel": (128,T_mel), "audio": (seg,), "n_samples": int}
         ...
 ```
 
-**Acceptance** (`tests/test_dataset.py`):
-- [ ] train mode: 出力 audio の peak が gain に応じて変化
-- [ ] val mode: 出力 audio の peak が ≈ `10**(-3/20)` ≈ 0.708
-- [ ] segment_length より短い wav は反射 pad、長いものは random crop
-- [ ] mel と audio の時間長整合: `audio.shape[0] == mel.shape[1] * hop_length`
+**Acceptance** (`tests/test_dataset.py`、2026-05-27 完了、15 件 pass):
+- [x] train mode: peak 正規化 gain が U(-6, -1) dBFS、val mode: peak ≈ `10**(-3/20)` ≈ 0.708
+- [x] segment_length より短い wav は反射 pad (極端に短いものは tile)、長いものは random crop (val は先頭固定)
+- [x] mel と audio の時間長整合: **`mel.shape[1] == 1 + audio.shape[0]//hop`** (center=True、チケットの `(T_mel-1)*hop` 式は GAN 16384 で破綻するため修正)。generator 出力 (T_mel*hop) の crop は T-M2.4 責務
+- [x] Batch TypedDict / seed_worker / n_samples attribute / from_config
 
 ### M2.2 Discriminator (`src/wavenext2/models/discriminator.py`)
 **チケット**: [T-M2.2](tickets/T-M2.2-discriminator.md)

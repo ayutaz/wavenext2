@@ -35,20 +35,23 @@ log_mel = torch.log(torch.clamp(mel, min=1e-5))
 ```
 
 ### 1.2.5 Audio 正規化 (Vocos 方式、確定)
+
+> **実装は peak 正規化で再構成 (T-M2.1, 2026-05-27)**: torchaudio 2.11 で `sox_effects` が
+> 削除されたため、下記 sox コードは使えない。sox `norm -X dB` は peak を −X dBFS に合わせる
+> 線形ゲインなので、**`gain = 10**(target_dbfs/20) / audio.abs().max(); audio *= gain`** で
+> **数値等価に自前実装** (`src/wavenext2/data/dataset.py::_peak_normalize`)。音声 I/O は soundfile。
+> 意味は不変: train は peak U(−6,−1) dBFS、val/推論は −3 dBFS。下記は原典 (Vocos) の記録。
+
 ```python
-# 訓練時 (random gain)
+# 原典 (Vocos)。torchaudio 2.11 では sox_effects 不可 → peak 正規化で再実装。
 gain_db = np.random.uniform(-1, -6)
 audio, _ = torchaudio.sox_effects.apply_effects_tensor(
     audio, sr=24000, effects=[["norm", f"{gain_db:.2f}"]]
 )
-# 検証/推論時
-gain_db = -3.0
-audio, _ = torchaudio.sox_effects.apply_effects_tensor(
-    audio, sr=24000, effects=[["norm", "-3.0"]]
-)
+gain_db = -3.0  # 検証/推論時
 ```
 - 出力: `float32`, `[-1, 1]`, mono (stereo の場合は `mean(dim=0)`)
-- LUFS 正規化や peak clip は不要 (sox `norm` が peak-based)
+- LUFS 正規化や peak clip は不要 (peak-based 正規化のため)
 
 ### 1.3 切り出し
 - 訓練時セグメント長: **16,384〜25,600 サンプル** (= 0.68〜1.07 秒 @24kHz)

@@ -3,11 +3,11 @@ id: T-M2.1
 title: LibriTTS-R Dataset + sox norm 正規化
 milestone: M2
 phase: M2
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26  # M2 phase review 反映
+updated: 2026-05-27  # 実装完了 (sox→peak-norm, soundfile, time-alignment 修正)
 depends_on: [T-M0.3, T-M1.3]
 blocks: [T-M2.5, T-M3.2]
 related_docs:
@@ -669,9 +669,20 @@ class LibriTTSRDataset(Dataset):
 | `segment_length=24576` (Vocos 流) | **M5.1 MR-STFT 収束が遅い場合** | GAN config を 16384 → 24576 へ切替 |
 | `Batch` TypedDict 戻り値 | **本チケットで採用済** | M3 で `noise_level`、M4 で `speaker_id` 追加に前方互換 |
 
-### 8.4 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未記入)
-- 次の似たタスクで応用できる教訓: (未記入)
+### 8.4 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `LibriTTSRDataset` 実装、`tests/test_dataset.py` 15 件 pass (合成 wav + TSV)。`Batch` TypedDict、`seed_worker`、`n_samples` attribute、`from_config`、`return_mel=False` は NotImplementedError 予約。
+
+チケット記述からの確定的変更 (M0.1 / 整合性検算より):
+1. **sox `norm` → peak 正規化 + soundfile** (torchaudio 2.11 で sox_effects/load 廃止、T-M0.1 §9.1)。`gain = 10**(target_dbfs/20) / peak; audio *= gain` で sox norm と数値等価。`test_peak_normalize_val_target` で peak→10^(-3/20)=0.708 を検証。**チケット §2.2 の `torchaudio.load`/`sox_effects.apply_effects_tensor` は使わない**。
+2. **time-alignment 式を修正 (重要)**: チケットの `(T_mel-1)*hop == T_audio` は **GAN segment 16384 (hop 300 の倍数でない) で破綻** (54*300=16200≠16384)。torchaudio center=True の正しい不変量は **`T_mel == 1 + T_audio//hop`**。これで全 segment 長に対応。`_assert_time_alignment` はこの式で検証。
+   - **副次的帰結 (T-M2.4 申し送り)**: generator 出力長 = T_mel*hop は segment_length と **hop ぶんずれる** (center=True の +1 frame、Vocos は iSTFT で吸収するが WaveNeXt の linear head は T_mel*hop を出す)。**fixed-point / loss で generator 出力を segment_length に crop する責務は T-M2.4/T-M2.5**。
+3. **極端に短い wav は反射 pad 不可** (reflect は pad<input が必要) → tile fallback を追加 (`test_very_short_audio_tiled`)。
+
+次の似たタスクで応用できる教訓:
+- 信号長の不変量はマジック式 (`(T-1)*hop`) を鵜呑みにせず、実フレームワーク (torchaudio center=True) の定義で検算する。segment_length が hop の倍数かで式が変わる。
+- peak 正規化は crop 後だと peak が保たれない (crop が peak を含まない場合) ため、**正規化 → crop の順**にし、peak テストは正規化メソッド単体 or pad ケースで行う。
 
 ## 9. 後続タスクへの連絡事項
 
