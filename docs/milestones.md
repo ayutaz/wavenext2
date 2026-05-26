@@ -306,10 +306,10 @@ class LibriTTSRDataset(Dataset):
 
 **Deliverable**: MSD × 3 (WaveFit-PT 完全準拠、MPD なし)
 
-**Acceptance**:
-- [ ] 入力 `(B, 1, T)` で 3 つの sub-discriminator から出力リストを返す
-- [ ] 各 sub-discriminator の中間特徴も返す (FM loss 用)
-- [ ] AvgPool1d で隣接 sub-discriminator 間 downsample
+**Acceptance** (`tests/test_discriminator.py`、2026-05-27 完了、12 件 pass):
+- [x] 入力 `(B, 1, T)` (or `(B, T)`) で 3 つの sub-discriminator から `SubDiscOutput(logits, features)` の list を返す
+- [x] 各 sub-discriminator の中間特徴 6 個を返す (FM loss 用)、channel 進行 [16,64,256,1024,1024,1024]
+- [x] AvgPool1d(k4,s2,p1) で隣接 sub-discriminator 間 downsample、weight_norm 全 Conv1d、Tanh/Sigmoid 不在 (hinge 互換)
 
 ### M2.3 Loss 関数 (`src/wavenext2/losses/`)
 **チケット**: [T-M2.3](tickets/T-M2.3-losses.md)

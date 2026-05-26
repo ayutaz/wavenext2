@@ -3,11 +3,11 @@ id: T-M2.2
 title: Multi-Scale Discriminator (MSD ×3、MPD なし、WaveFit-PT 準拠)
 milestone: M2
 phase: M2
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.2]
 blocks: [T-M2.3, T-M2.5]
 related_docs:
@@ -702,10 +702,20 @@ WaveFit-PT 設定 (`ndf=16, n_layers=4, downsampling_factor=4, max_channels=1024
   - 採用根拠: WaveFit-PT 準拠を default で守る。`num_D=5` 等を渡すと M6.3 ablation 用途として動作するが、default では論文準拠
   - `MultiScaleDiscriminator.NUM_D = 3` クラス属性で「論文準拠の正本」を公開
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `MultiScaleDiscriminator` (MSD×3) + `NLayerDiscriminator` 実装、`tests/test_discriminator.py` 12 件 pass。channel 進行 [16,64,256,1024,1024,1024] 確認、weight_norm は `torch.nn.utils.parametrizations.weight_norm`。
+- 出力を **`SubDiscOutput(logits, features)` NamedTuple の list** に (M2 review 採用)。`(B,T)→(B,1,T)` defensive unsqueeze。
+
+実装上の判断:
+1. **hinge GAN 互換性テストは「logits>1」でなく「Tanh/Sigmoid 不在」で構造検証**: init 時の logits は weight_norm で小さく `|logits|>1` が保証されない (脆い)。`not any(isinstance(m,(nn.Tanh,nn.Sigmoid)))` で「bounded activation 無し」を直接確認する方が頑健。教訓: **「出力が unbounded」は値でなく構造 (activation の不在) で検証する**。
+2. **weight_norm テストは API 非依存に**: `torch.nn.utils.parametrize.is_parametrized(conv, "weight")` で parametrization 有無を確認 (新旧 weight_norm API どちらでも通る)。
+3. grouped conv の `groups=nf_prev//4` は全層で in/out が groups で割り切れることを確認 (16→64 g4, 64→256 g16, ...)。
+
+次の似たタスクで応用できる教訓:
+- 未訓練モデルの「unbounded」性質は値テストでなく構造テスト (禁止 module の不在) で書く。
+- NamedTuple 出力は下流 (T-M2.3 loss) が `.logits`/`.features` で読めて tuple index より可読。
 
 ## 9. 後続タスクへの連絡事項
 
