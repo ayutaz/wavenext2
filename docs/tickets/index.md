@@ -98,7 +98,7 @@
 | マイルストーン | 完了日 | レビュー実施日 | 主な更新点 |
 |---|---|---|---|
 | M0 | — | 2026-05-26 | `src/wavenext2/` パッケージ化採用 (T-M0.2)、scaffold で Docker/CI/pre-commit/`.gitattributes`/`.env.example` stub を commit (T-M0.2)、filelist を TSV header 付き化 + speaker-balanced val + `dev_postfilter.tsv` 同時生成 + stats.json/audio_info.tsv 出力 (T-M0.3)、再現性関連リスク 6 件追加 (T-M0.1)、Critical: docs/training.md の `test-clean-100` 表記揺れを T-M0.3 実装時に解決予定 |
-| M1 | — | — | — |
+| M1 | — | 2026-05-26 | T-M1.1 `forward(x, *, cond=None)` keyword-only 確定 + `fc_t.bias=0` zero init、T-M1.2 dynamic range mismatch (critical) + iSTFT 予約、T-M1.3 `eps=1e-7` Vocos 互換 (暫定) + precompute 設計、T-M1.4 `enable_grad_ckpt` / `final_activation` / `block_factory` 引数化 + `linear_2` clip 飽和懸念、T-M1.5 `c * 1000` rescale (M3 smoke 最優先 ablation) + `fc1.bias=0` 検討、T-M1.6 **Critical** 戻り値仕様 (n_t vs y_{t-1}) を実装時に再確認 + `from_config()` factory 採用、横断: `tests/conftest.py` fixture 戦略を T-M0.2 へ申し送り |
 | M2 | — | — | — |
 | M3 | — | — | — |
 | M4 | — | — | — |

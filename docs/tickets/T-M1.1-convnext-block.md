@@ -274,6 +274,14 @@ size=M (中規模) のため標準編成 (Implementer 1 + Reviewer 1 + Tester 1)
 - [ ] `test_error_invalid_kernel` — `kernel_size=6` (偶数) で `ValueError`
 - [ ] `test_bias_broadcasts_over_time` — Diff モードで `T` を変化させても `cond` のみで動作する (`unsqueeze(-1)` の broadcast が機能)
 - [ ] `test_cond_changes_output` — Diff モードで `cond1 ≠ cond2` のとき出力も異なる (`(out1 - out2).abs().max() > 1e-6`)
+- [ ] `test_snapshot_sha256_gan` — `torch.manual_seed(0); x = randn(2, 512, 80); out = block(x)` の出力テンソルの SHA256 を `tests/snapshots/convnext_gan.pt` に pin。値が変化したら torch upgrade / 実装ドリフトを検知 (snapshot 生成時は initial commit、以後は assert のみ)
+- [ ] `test_snapshot_sha256_diff` — Diff モード版の同等 snapshot を `tests/snapshots/convnext_diff.pt` に pin
+
+#### テスト戦略の追加方針
+
+- **GPU/CPU device-agnostic**: 主要テストは `@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available"))])` で CPU/GPU 両方をカバー。CI は CPU のみ実行、ローカル GPU マシンでは CUDA も自動実行
+- **CI 時間目標**: CPU で全 18 unit テスト合計 **< 5 秒** (ConvNeXt block は小規模なので余裕で達成可能、`pytest --durations=10` で監視)
+- **coverage 目標**: `pytest --cov=wavenext2.models.convnext --cov-report=term-missing` で **95% 以上**。LayerScale γ の `requires_grad=True` 分岐や error path も含める
 
 ### 5.2 e2e / 結合テスト
 - [ ] `uv run python -c "from wavenext2.models.convnext import ConvNeXtBlock; b = ConvNeXtBlock(); print(sum(p.numel() for p in b.parameters()))"` で約 1.58M を出力
@@ -302,6 +310,10 @@ size=M (中規模) のため標準編成 (Implementer 1 + Reviewer 1 + Tester 1)
 | **`torch.compile` 非互換コード** | M5/M6 で `torch.compile` を有効化したとき graph break | 本チケットでは `compile` 検証は実施しない。M3 smoke で問題発生時に再調査 (docs/tickets/T-M0.1 §6.1 と整合) |
 | **Vocos のコードを誤って参考実装からコピーする** | CLAUDE.md ポリシー違反 (公開予定リポジトリ) | Reviewer が docstring / 構造の独自性を確認。Vocos の `ConvNeXtBlock` は構造順序の docstring を持たないが本実装は独自 docstring を書く |
 | **bias term の初期化** | `nn.Linear` 既定は uniform(-1/sqrt(in), 1/sqrt(in))、ゼロではない | 本実装では bias を 0 init しない (PyTorch default に任せる)。T-M1.4 Generator で `apply()` 一括 init する設計だが、本ブロックは Block 内部で init しない (docs/open-questions.md §C2 L186 注: 「全 Conv1d / Linear: trunc_normal_(std=0.02)、bias: zero」は Generator レベルで一括適用される想定) |
+| **`torch.compile` `fullgraph=True` で error path が graph 化される問題** | `raise ValueError(cond is None)` 等の Python 例外が `fullgraph=True` で graph 内に含まれると compile が fail する。`mode="reduce-overhead"` (graph break 許容) なら回避可能だが、`fullgraph=True` (graph break 禁止) では NG | M5/M6 で `torch.compile` 導入時は `mode="reduce-overhead"` 限定で利用することを明記。`fullgraph=True` が必要になった場合は ValueError を別関数に切り出すか `@torch.compiler.disable` で `forward` 全体を opt-out するなどの対応を検討 (本チケットでは対応しない) |
+| **bf16 で `gamma * x` broadcast multiplication の挙動** | LayerScale `gamma * x` で `gamma` が fp32、`x` が bf16 の場合、PyTorch は fp32 へ昇格して計算 (autocast 規則) するが、Vocos / FastDiff 実装と差異がないか要確認 | M5/M6 で bf16 訓練を有効化する際、Vocos 既存実装と数値比較してドリフトがないか確認。本チケットでは fp32 のみテストし、bf16 挙動は M5 でカバー |
+| **T-M1.4 Generator 側 `_init_weights` が Block 内部 (`fc_t`, `dwconv`, `pwconv1/2`) を巻き込む** | Block 単体テスト (`tests/test_convnext.py`) では PyTorch default init で動作確認するが、Generator 経由で init された後の値が Block 単体テストの初期値と食い違う。Block レベルで初期値 assert はしない設計だが、Generator init 後の Block 挙動が単体テストでカバーできていないリスク | Block レベルで初期値 assert はしない (`test_layer_scale_init_value` の γ=1e-6 のみ例外)。Generator init 後の Block 挙動変化 (例: `fc_t.bias=0` で初期 bias 注入が 0、`dwconv.weight ~ trunc_normal_(std=0.02)` 等) は T-M1.4 のテストでカバーする想定。本ファイル §9.1 で T-M1.4 に明示的に申し送り |
+| **channels-last 形式と PyTorch native の transpose コスト** | `x.transpose(1, 2)` を block 内で 2 回行うため、8 block × `T_mel` × `dim=512` で memory bandwidth bound になる可能性。`Conv1d(kernel=1)` への置換や `torch.channels_last` memory_format の利用で改善可能 | 本チケットでは Vocos 準拠で transpose ベースを採用。M6 profiling で transpose がボトルネックと判明した場合に `Conv1d(k=1)` 置換や `memory_format=channels_last` を試す (M6 最適化フェーズに予約) |
 
 ### 6.2 仕様の曖昧さ
 - `docs/open-questions.md` 参照: §C1 (ConvNeXt 内部) と §C7 (Diff conditioning) は **両方とも 100% 確定**
@@ -352,8 +364,10 @@ size=M (中規模) のため標準編成 (Implementer 1 + Reviewer 1 + Tester 1)
 |---|---|---|---|---|
 | **GAN/Diff 共通 1 クラス (採用案)** | コード重複なし、引数で明示的に分岐、Generator から統一構築できる | forward で `if self.fc_t is not None` の分岐コストが入る (微小)、API がやや複雑 | docs/architecture.md §2 / §5.4 が「同じ block 構造を使う」ことを明示。1 クラスで実装するのが論文の意図に最も忠実 | (採用済み) |
 | **GAN/Diff 2 クラス分離** (`ConvNeXtBlockGAN`, `ConvNeXtBlockDiff`) | API がシンプル、forward 分岐なし、IDE 補完が綺麗 | コード重複、Generator 側で if 分岐が必要、機能追加 (例: 別 conditioning) で N×2 クラス増加 | 1 クラス案の方が拡張性が高い (将来 FiLM や cross-attention 追加時も `conditioning_kind` 引数で吸収可能) | **M3 smoke で Diff 訓練が不安定でデバッグ難易度が GAN/Diff 分岐に起因することが判明したとき** (e.g., Diff path の hidden state が NaN になる場合の切り分けが面倒な時) |
+| **`ConditionalConvNeXtBlock` を Decorator pattern で別クラス化** (純粋 ConvNeXt は `ConvNeXtBlock`、conditioning は外側ラッパで合成) | 純粋 ConvNeXt と Diff conditioning が分離され単一責任原則に従う、テストが疎結合になる | 2 クラス分離と類似のコード重複・呼び分けコスト、Generator 側で wrapper 構築が必要、`if self.fc_t is not None` の分岐コストは消えるが構造的に複雑化 | 1 クラス案の方が論文記述 (「同じ block 構造を使う」) に忠実かつ Generator 側の `ModuleList` 構築が単純。Decorator は M6.3 ablation で `conditioning_kind` 抽象化を本格化する際に再評価 | **M6.3 ablation で複数 conditioning 方式 (additive / FiLM / cross-attn) を比較する段階** で wrapper 化を検討 |
 | **追加 conditioning 方式 (FiLM = scale + shift)** | より表現力が高い、近年の diffusion モデル (DiT, U-ViT) で標準的 | FastDiff の論文記述 (additive bias) に反する、再現性低下 | docs/open-questions.md §C7 で FastDiff 流 additive bias を確定。論文再現が最優先 | **本格訓練 (M6) で論文 Table 2 の UTMOS / NISQA を 10% 以上下回ったとき**、FiLM 化 ablation を実施 |
-| **`conditioning_kind="additive" | "film" | "none"` 引数で挙動を選択** | 1 つのコードで 3 方式比較可能、ablation 実験に便利 | API 複雑化、再現実装の優先順位を下げる | M6 後の ablation チケットで対応する方が健全 (本実装ではシンプル維持) | **M6.3 (ablation) チケット起動時** に再評価。`conditioning_kind` 引数を追加する案を再検討 |
+| **`conditioning_kind: Literal["none", "additive"]` 引数で将来 FiLM 等を拡張可能化** | 将来 `"film"` / `"cross_attn"` を追加するときに後方互換で拡張できる、引数で明示的に挙動を選択できる | 現時点では `"additive"` 一択なので overengineering ぎみ、`conditioning_dim` との二重情報になる | 本実装フェーズでは `conditioning_dim` の有無で十分。将来 FiLM 等の選択肢が増えた時点で導入 | **M6.3 (ablation) チケット起動時** に `conditioning_kind` 引数を導入して `"additive"` / `"film"` を比較する |
+| **`fc_t` factory 引数化 (`fc_factory: Callable[[int, int], nn.Module] = nn.Linear`)** | fp16 / bf16 で `nn.Linear` が不安定なときに `nn.Linear` + LayerNorm の合成や独自モジュールに差し替え可能、テスト時に mock 注入できる | API 複雑化、デフォルト挙動の理解コスト増、現状不要 | 現時点では `nn.Linear` 一択で問題なし。差し替え要件が出たら導入 | **M3 smoke (Diff) で fp16 conditioning が NaN/不安定になったとき**、`fc_factory` を導入して `Linear + LayerNorm` 合成等を試す |
 | **LayerScale を GroupNorm に置換** | LayerScale なしのよりシンプルな ConvNeXt (元論文 v1) | Vocos / 元 ConvNeXt v2 の挙動と乖離、論文再現性低下 | LayerScale + LN は Vocos / 元 ConvNeXt の標準 (docs/open-questions.md §C1) | **DyT (Dynamic Tanh) 等の新しい normalization が ConvNeXt 系で標準化されたとき** (Transformer DyT 論文 [Zhu et al. 2024] が時系列で広く採用された場合)。LayerScale + LN の代替として DyT を試す価値あり |
 | **DyT (Dynamic Tanh) を LayerNorm の代替に検討** | normalization が学習可能スカラーで置き換えられ、訓練不安定が緩和される事例あり (近年提案) | 論文再現の文脈で「DyT 採用」は逸脱。再現性最優先のフェーズでは不採用 | LN + LayerScale が Vocos / FastDiff / 元 ConvNeXt で確立しているため再現実装フェーズでは触らない | **M6 で原論文 Vocos と同等品質を達成した後、追加実験フェーズで DyT を ablation 候補に入れる** (M6.3 ablation) |
 | **Depthwise Conv を MaxBlurPool + standard Conv に分解** | Aliasing 抑制で帯域外を綺麗にできる | パラメータ数増、推論速度低下、論文と乖離 | 論文再現が最優先。本クラスは Vocos 準拠の Depthwise Conv のみ | (再評価しない、本フェーズでは固定) |
@@ -367,8 +381,11 @@ size=M (中規模) のため標準編成 (Implementer 1 + Reviewer 1 + Tester 1)
 - **このサブタスクの粒度は適切か**: 適切。`ConvNeXtBlock` は WaveNeXt 2 の最も基本的なビルディングブロックで、Generator (T-M1.4) / Sub-model (T-M1.6) の構成要素として独立した責務を持つ。1 チケットで完結する size=M の規模感
 - **別マイルストーンに移すべき部分はないか**: なし。`fc_t` を T-M1.5 (Noise embedding) に移すと sub-model 構造が分散し追跡しにくくなる。`fc_t` は per-block の責務なので本チケットで持つのが正解
 - **インターフェース定義の見直し余地**:
-  - `forward(x, cond=None)` の signature は確定済み。`cond` は keyword-only にする (`forward(x, *, cond=None)`) ことで positional 誤用を防ぐ案あり → **採用検討中**、本チケットでは positional 許容のまま (Generator 側の呼び出し簡潔性を優先)
+  - `forward(x, *, cond=None)` の signature を **keyword-only に確定** (M1 フェーズレビュー結果)。positional での誤用 (`block(x, some_tensor)` で意図せず cond として渡る) を API レベルで封じる。Generator 側の呼び出しも `block(x, cond=cond)` で明示的になり可読性が向上
   - `dim`, `intermediate_dim`, `kernel_size` をすべて default 値持ちにすることで Generator 側の呼び出しが `ConvNeXtBlock()` 一発で書けるが、`conditioning_dim` だけは Generator 側で明示することで GAN/Diff 切り替えを意識させる設計
+- **`fc_t` の bias を zero init する方針**: FastDiff 準拠で zero init を採用 (T-M1.4 Generator の `_init_weights` 経由で適用)。理由: `trunc_normal_(std=0.02)` で `nn.Linear` の bias を初期化すると、出力 `fc_t(cond)` は `weight @ cond + bias` の bias 項が `O(sqrt(dim) * std) = sqrt(512) * 0.02 ≈ 0.45` 程度のノイズになる。これを LayerNorm(eps=1e-6) 前の `x` に additive で加算すると、訓練初期に信号が大きく揺さぶられて収束が遅れる。bias=0 init により、訓練初期は `fc_t(cond)` ≈ `weight @ cond` だけが効き、cond が 0 に近い領域では bias 注入が無効化される (LayerScale γ=1e-6 と整合する「初期 identity」設計)
+- **「重み初期化は Generator 側で一括 (apply)」設計の採用根拠**: Block は自前 `_init_weights` を持たない。T-M1.4 Generator の `_init_weights` が `apply()` で walk して Block 内部 (`fc_t`, `dwconv`, `pwconv1/2`, `norm`) を init する責任を持つ前提を明示。理由 (a) Vocos `VocosBackbone` の設計に整合、(b) Generator レベルで `trunc_normal_(std=0.02)` / bias=0 / `fc_t.bias=0` を一元管理できる、(c) Block を別 Generator (将来の variant) に流用する際も init 方針を呼び出し側で制御できる。Block 単体テストでは PyTorch default init のまま動作することのみ確認 (`test_layer_scale_init_value` 以外で初期値 assert はしない)
+- **M1 phase review で API 横断整合性チェック**: M1 完了時に T-M1.1〜T-M1.6 全てを横断レビューし、以下の整合性を確認する: (a) keyword-only `cond` が全 sub-model / Generator で一貫している、(b) factory パターン (現時点では未導入だが将来 `fc_factory` を入れる場合) の命名が `xxx_factory` で統一されている、(c) `cond` / `noise_emb` / `c` の naming が混在していない (推奨: 外部 API は `cond`、内部は `noise_emb`)、(d) `conditioning_dim` の default 値 (None vs 0) が混在していない
 
 ### 8.3 学んだこと (チケット完了後に追記)
 - 実装中に判明した想定外: (未着手)
@@ -393,23 +410,36 @@ ConvNeXtBlock(
     conditioning_dim: int | None = None,  # None=GAN, 512=Diff
 )
 
-# Forward signature (確定)
+# Forward signature (確定、keyword-only cond)
 out = block(x, cond=None)
 # x: (B, dim, T)
-# cond: (B, conditioning_dim) — Diff モードでのみ、GAN モードでは None
+# cond: (B, conditioning_dim) — Diff モードでのみ、GAN モードでは None。keyword-only (`forward(x, *, cond=None)`)
 # out: (B, dim, T) — shape 不変
 ```
+
+**T-M0.2 (scaffold) への申し送り**:
+- `tests/conftest.py` に以下 fixture を追加する設計を推奨:
+  - `@pytest.fixture(autouse=True) def set_seed(): torch.manual_seed(42)` — 全テストで自動 seed 固定
+  - `@pytest.fixture(scope="module") def gan_block()` — `ConvNeXtBlock(conditioning_dim=None)` を module スコープでキャッシュ
+  - `@pytest.fixture(scope="module") def diff_block()` — `ConvNeXtBlock(conditioning_dim=512)` を module スコープでキャッシュ
+- `pytest-randomly` を `dev` extras に追加し、テスト順序のランダム化 + seed 固定の両立を保証 (テスト順序依存のバグを早期検知)
+- `tests/snapshots/` ディレクトリを scaffold 時に作成、`.gitkeep` を置く
+- 詳細実装は T-M0.2 (`tests/` 構成) と T-M1.1 (`tests/test_convnext.py`) の両方で調整
 
 **T-M1.4 (Generator) への連絡**:
 - Generator は `self.blocks = nn.ModuleList([ConvNeXtBlock(dim=512, intermediate_dim=1536, kernel_size=7, conditioning_dim=cond_dim) for _ in range(n_blocks)])` で 8 個保持
 - `cond_dim` は GAN なら None、Diff なら 512
-- forward では `for block in self.blocks: x = block(x, cond=cond)` (GAN なら cond=None を渡せばよい、Diff なら NoiseEmbedding 出力 (B, 512) を渡す)
+- forward では `for block in self.blocks: x = block(x, cond=cond)` (keyword-only、Diff なら NoiseEmbedding 出力 (B, 512) を渡す、GAN なら cond キーワードを省略 or `cond=None`)
 - 重み初期化 (`trunc_normal_(std=0.02)`、bias=0) は **Generator レベルで `apply()` 一括適用** する設計 (本ブロックは init を持たない、Vocos 同様)
+- **責任境界の明文化**: ConvNeXtBlock は自前 `_init_weights` を持たない。Generator 側 `_init_weights` が `self.apply(self._init_weights)` で walk して Block 内部 (`fc_t`, `dwconv`, `pwconv1`, `pwconv2`) を init する責任を持つ。Block レベルではこの前提を docstring で明示し、Generator が init を提供しなかった場合は PyTorch default のままになることを許容
+- **`fc_t.bias = 0` init 指示**: Block の `__init__` で zero init はせず、Generator の `_init_weights` で `if isinstance(module, nn.Linear): nn.init.zeros_(module.bias)` を適用する。これにより `fc_t.bias` も自動的に 0 init される (FastDiff 準拠、§8.2 参照)。`fc_t` だけ特別扱いせず、全 `nn.Linear` の bias を一律 0 init する設計
+- `apply()` walk の意図: Block のサブモジュール (`fc_t: Linear`, `dwconv: Conv1d`, `pwconv1: Linear`, `pwconv2: Linear`, `norm: LayerNorm`) が全て Generator の `_init_weights` で訪問される。`gamma` (LayerScale パラメータ) は `nn.Parameter` 直下なので `apply()` の対象外 (これは意図通り、γ は Block の `__init__` で `1e-6 * ones(dim)` 初期化済み)
 - パラメータ数概算: 8 × 1.58M (GAN block) = 12.64M、または 8 × 1.85M (Diff block) = 14.8M
 
 **T-M1.6 (Sub-model) への連絡**:
 - `SubModelDiff` は `NoiseEmbedding` (T-M1.5) → Generator (T-M1.4) → Generator 内部で各 ConvNeXtBlock に cond が流れる、というデータフロー
 - `SubModelGAN` は cond なし、ConvNeXtBlock の `conditioning_dim=None` で構築される
+- Sub-model 側で Generator を呼ぶ際も keyword-only で `generator(x, cond=cond)` の形を取る (一貫性のため)
 
 **T-M1.5 (Noise embedding) への連絡**:
 - `NoiseEmbedding(c: Tensor (B,)) -> Tensor (B, 512)` の出力 shape を本クラスの `cond` 引数 shape `(B, conditioning_dim=512)` に整合させる
@@ -426,6 +456,14 @@ out = block(x, cond=None)
 - 解決できなかった疑問: なし (確定事項の単純実装)
 - `docs/open-questions.md` への追記要否: 不要 (現状の §C1, §C7 で完全カバー)
 - 将来検討事項:
-  - `conditioning_kind` 引数化 (additive | film | none) — M6.3 ablation で再評価
-  - `cond` を keyword-only にする (`forward(x, *, cond=None)`) — M1 フェーズレビューで決定
+  - `conditioning_kind: Literal["none", "additive"]` 引数化 (将来 `"film"` / `"cross_attn"` 追加) — M6.3 ablation で再評価
+  - `fc_factory` 引数化 (fp16/bf16 不安定時の代替) — M3 smoke で再評価
   - DyT (Dynamic Tanh) を LayerNorm 代替に — M6 後 ablation フェーズで検討
+
+**M1 フェーズレビュー (2026-05-26) で決定された事項**:
+- `forward(x, *, cond=None)` を **keyword-only に確定** (§8.1 / §8.2 反映済み)
+- `ConditionalConvNeXtBlock` の Decorator pattern 案を §8.1 に追加 (却下、M6.3 で再評価)
+- `conditioning_kind` / `fc_factory` 引数の将来拡張余地を §8.1 に明文化
+- `fc_t.bias = 0` init を T-M1.4 Generator の `_init_weights` で対応する責任境界を §8.2 / §9.1 で明文化
+- snapshot SHA256 pin / GPU/CPU device-agnostic / CI 5 秒目標 / coverage 95% を §5.1 に追加
+- `torch.compile fullgraph=True` / bf16 broadcast / Generator init 巻き込み / channels-last 化を §6.1 に追加

@@ -201,8 +201,10 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 
 - [ ] `test_sinusoidal_shape`: `sinusoidal_embedding(torch.tensor([0.5]), dim=128).shape == (1, 128)`
 - [ ] `test_sinusoidal_even_dim_required`: `sinusoidal_embedding(c, dim=127)` で `ValueError`
-- [ ] `test_sinusoidal_freq_log_spaced`: freq[0] / freq[-1] ≈ 10000 を満たす (= log-spaced 確認、§5.3 Acceptance 4 項目目に対応)。実装で `freq = exp(-arange(64) * log(10000) / 63)` なので `freq[0] = exp(0) = 1.0`, `freq[-1] = exp(-log(10000)) = 1e-4`、比は 10000
-- [ ] `test_sinusoidal_concat_order`: 前半 64 次元が sin、後半 64 次元が cos であることを検証 (`embed[:, 64:]` が cos(0) = 1 から始まる成分を持つ etc.)
+- [ ] `test_sinusoidal_freq_log_spaced`: **厳密一致テスト**: `assert freq[0] / freq[-1] == 10000.0` (許容なし、float32 で完全一致を確認)。実装で `freq = exp(-arange(64) * log(10000) / 63)` なので `freq[0] = exp(0) = 1.0`, `freq[-1] = exp(-log(10000)) = 1e-4`、比は厳密に 10000。log_scale off-by-one バグ (`/half` vs `/(half-1)`) の早期検知に必須
+- [ ] `test_sinusoidal_concat_order`: 前半 64 次元が sin、後半 64 次元が cos であることを検証 (`embed[:, 64:]` が cos(0) = 1 から始まる成分を持つ etc.)。**concat 順注記**: FastDiff は `[sin; cos]` 順、Transformer 慣例 (Diffusion-LM 等) は `[cos; sin]` や `[sin_even; cos_odd]` interleave の場合もある。後段 `Linear(128, 512)` で permutation invariant なので学習可能性に影響しないが、SHA256 pin (下記) との一貫性のため `[sin; cos]` 固定とする
+- [ ] `test_sinusoidal_sha256_pin`: `sinusoidal_embedding(torch.tensor([0.5, 0.9]), dim=128)` の出力テンソルの SHA256 を `tests/snapshots/noise_emb.json` に **pin**。log_scale off-by-one バグ / concat 順変更 / dtype 不一致を CI で即検知する regression test。値が変わる変更は意図的に snapshot を更新するレビューを要する
+- [ ] `test_sinusoidal_property` (`hypothesis`): `sinusoidal_embedding` の `c` を `st.floats(min_value=0.0, max_value=1.0)` で property test。**不変条件**: (a) `freq[0]/freq[-1] ≈ 10000` を 100 ケースで保持、(b) 出力 dim が常に `dim` 引数と一致、(c) `(out**2).sum(-1)` が `dim/2 = 64` (= sin² + cos² = 1 × half)。`hypothesis` を `pyproject.toml` 開発依存に追加
 - [ ] `test_noise_embedding_forward_shape`: `NoiseEmbedding()(torch.tensor([0.5]))` の出力 shape が `(1, 512)`
 - [ ] `test_noise_embedding_batch`: `NoiseEmbedding()(torch.rand(8))` の出力 shape が `(8, 512)`
 - [ ] `test_noise_embedding_deterministic`: 同じ c を 2 回 forward した結果が `torch.allclose` (eval mode、no Dropout)
@@ -210,14 +212,20 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 - [ ] `test_noise_embedding_param_count`: パラメータ数 = `128*512 + 512 + 512*512 + 512 = 328,704` (FC1: 65,536 + 512 = 66,048; FC2: 262,144 + 512 = 262,656; 合計 328,704)
 - [ ] `test_noise_embedding_gradient_flow`: `loss = NoiseEmbedding()(c).sum(); loss.backward()` で全パラメータの `.grad` が `None` でない (学習可能性確認)
 - [ ] `test_noise_embedding_silu_activation`: forward 内で SiLU が使われていることを (a) `isinstance(module.act, nn.SiLU)` で確認、(b) ReLU と異なる挙動を負入力で確認
-- [ ] `test_noise_embedding_devices_dtype`: `c.dtype` と `c.device` に出力が追従する (CPU float32 / CUDA float32 / float64 のラウンドトリップ。CUDA テストは `pytest.mark.skipif(not torch.cuda.is_available())`)
+- [ ] `test_noise_embedding_devices_dtype`: `c.dtype` と `c.device` に出力が追従する。**fp16/bf16 追加**: CPU float32 / CUDA float32 / float64 / **bf16 (`(freq > 0).all()` を確認)** / fp16 (`(freq > 0).all()` を確認、ただし CPU fp16 の arange+log が非決定なら `pytest.mark.skip`)。CUDA テストは `pytest.mark.skipif(not torch.cuda.is_available())`
 
-### 5.2 e2e / 結合テスト
+### 5.2 テスト実装上の取り決め
+- **`@pytest.fixture(scope="module") def noise_emb_model`**: `NoiseEmbedding()` instance を 12 テスト (forward 系) で再利用し、毎テストでの初期化コストを削減。`conftest.py` 側 (T-M0.2) に置くか、`test_noise_embedding.py` 内 module scope どちらでも可だが、本ファイル内に置けば責務が明確
+- **CI 時間目標**: < 2 秒 (size=S かつ純粋関数中心、SHA256 pin 比較も高速)
+- **coverage 目標**: 100% (純粋関数中心、branch も含めて全カバー可能。`pytest --cov=wavenext2.models.noise_embedding --cov-fail-under=100` を CI 設定の指針)
+- **fp16 deterministic**: CPU の fp16 で `arange + log + exp` の合成は PyTorch 公式で deterministic 保証なし。**fp16 テストは値比較ではなく `(freq > 0).all()` などの不変条件のみ**を確認し、SHA256 pin は float32 限定で行う
+
+### 5.3 e2e / 結合テスト
 - (本チケット時点では実施しない) T-M1.6 (SubModelDiff) 完成後に統合テストで確認:
   - `SubModelDiff(...)` 内の `self.noise_embedding(c)` → ConvNeXtBlock の `fc_t(e)` → block forward まで通る
   - 異なる noise level c を入れて出力波形が変わる (T-M3.5 smoke test の前段確認)
 
-### 5.3 Acceptance criteria (`docs/milestones.md` §M1.5 より転記)
+### 5.4 Acceptance criteria (`docs/milestones.md` §M1.5 より転記)
 - [ ] `c = torch.tensor([0.5])` で出力 shape `(1, 512)`
 - [ ] 同じ c に対する出力が deterministic
 - [ ] 異なる c に対する出力が異なる (cosine similarity < 0.99)
@@ -237,7 +245,9 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 | **入力 c の shape の柔軟性** | `(B,)`/`(B, 1)`/scalar の混在で broadcast 事故 | docstring で `(B,)` を仕様とし、`(B, 1)` で来た場合は呼び出し側で `squeeze` する責務にする。本実装は `c.unsqueeze(-1)` だけ行うので `(B,)` 専用。Out-of-shape の場合は assertion を入れるか型ヒントで `(B,)` を明示。**判断**: `(B,)` 専用とし、assertion は入れず docstring で十分とする (Python の duck typing) |
 | **CUDA seed 設定が必要なケース** | Acceptance §5.3「同じ c で deterministic」は学習可能パラメータが固定であれば自動的に成立 | テスト側で `torch.manual_seed(42)` を fixture で固定し、新規 `NoiseEmbedding()` のパラメータも reproducible にする (`tests/conftest.py` で global seed 設定) |
 | **既存の `torch.nn.Embedding` 機能との誤解** | 「embedding」という名前から `nn.Embedding(num_embeddings, dim)` (= lookup table) と混同されがち | docstring 冒頭に「これは **連続値** noise level を **continuous な** 埋め込み空間にマップする shared head であり、discrete index lookup の `nn.Embedding` ではない」と明記 |
-| **FastDiff 参考実装の license 確認** | コードコピーすると license 違反リスク (FastDiff は MIT) | CLAUDE.md ポリシー通り **コピー流用しない**。式 (sinusoidal + FC×2 SiLU) の同一性は本論文 / FastDiff 仕様で確定済みのため、独自に PyTorch で書き起こす。Reviewer で git blame と FastDiff 原コードを照合確認 |
+| **FastDiff 参考実装の license 確認** | コードコピーすると license 違反リスク (FastDiff は MIT) | CLAUDE.md ポリシー通り **コピー流用しない**。式 (sinusoidal + FC×2 SiLU) の同一性は本論文 / FastDiff 仕様で確定済みのため、独自に PyTorch で書き起こす。Reviewer で git blame と FastDiff 原コードを照合確認。**FastDiff `nn.Linear(bias=True)` の根拠**: 現状「FastDiff `Linear` は default `bias=True`」記述だが、FastDiff の `module/FastDiff_model.py` の具体的な行番号や class 名 (`DiffusionEmbedding` / `Conv` ラッパ) を docstring/comment に残す。Reviewer で原コード行番号を付記して根拠を確実にトレースできる状態にする |
+| **`c=0.0` で `Linear.bias` 支配的になる問題** (重要) | `sin(0)=0, cos(0)=1` で sinusoidal 出力が決定的パターン (前半 64 dim = 0、後半 64 dim = 1) → `Linear(128, 512).bias` がそのまま `cond` の支配項。学習初期に c≈0 の sub-model (k=1 など、低 noise band) で `bias` がそのまま信号として漏れる懸念。**緩和案**: (a) `fc1.bias` を **zero init** (デフォルト Kaiming uniform から変更)、(b) `fc1.bias` を **trainable のまま** (FastDiff 原コード準拠) のどちらを採用するか議論。本チケットでは **(b) FastDiff 準拠 (default init)** を採用し、Reviewer 確認項目に追加。M3.5 smoke で k=1 sub-model の学習不安定が観測された場合 (a) zero init を ablation で試す |
+| **bf16/fp16 で `freq` underflow** | `freq[-1] = exp(-9.21) ≈ 1e-4`。bf16 (mantissa 8bit, range fp32 と同等) では保持可能だが、fp16 (range 6.1e-5〜65504) では underflow ギリギリ。AMP fp16 訓練 (M3.2) で `freq[-1]` が 0 になり sin/cos がすべて 0 化するリスク | `test_noise_embedding_devices_dtype` に **fp16 ケースを追加** し `(freq > 0).all()` を確認。bf16 は安全なので preferred dtype として推奨。**CPU の fp16 で arange + log の合成が非決定 risk あり** (PyTorch CPU の fp16 算術は完全 deterministic 保証なし)、fp16 deterministic テストは skip 候補とし、bf16 で確認する |
 
 ### 6.2 仕様の曖昧さ
 - **`docs/open-questions.md` §C7** で sinusoidal + FC×2 SiLU が確定済み。残る曖昧さは **per-block projection の bias の有無** (FastDiff `Linear` は default `bias=True`)。本チケットの shared head は `nn.Linear` の default (`bias=True`) を採用。T-M1.1 ConvNeXtBlock の `fc_t` も同様に `bias=True` を採用する想定だが、T-M1.1 の責務として明示する (本チケットの §9.1 で連絡)
@@ -246,6 +256,7 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 
 ### 6.3 他チケットとの整合性
 - **T-M1.1 (ConvNeXtBlock)**: Diff モード時の `conditioning_dim=512` と本モジュールの `out_dim=512` が一致する必要あり。本チケットで `out_dim=512` を **default** とし、T-M1.1 と T-M1.5 のレビューで両方の値が一致していることを確認 (§9.1 連絡事項に明記)
+- **T-M1.4 (WaveNextGenerator) パラメータ数 cross-reference**: `NoiseEmbedding` は **0.33M** (= 328,704 params)。Diff sub-model では `conditioning_dim=512` を `WaveNextGenerator` の各 ConvNeXtBlock `fc_t(512, 512)` (per-block 約 0.26M × 8 block = **約 2.1M**) に渡す。論文 Table 1 の Diff **14.42M** に NoiseEmbedding 自身のパラメータ (0.33M) が含まれているか **T-M1.6 で再確認**。仮に含まれていない場合は per-sub-model で 0.33M × 4 sub-model = 1.32M の追加カウントが発生 (§9.1 に明記)
 - **T-M1.6 (SubModelDiff)**: `self.noise_embedding = NoiseEmbedding()` を保持、forward で `cond = self.noise_embedding(c)` → `self.generator(x, cond=cond)` を呼ぶ。**本モジュールの forward 返り値 shape `(B, 512)` を T-M1.6 と T-M1.1 が共通の `conditioning_dim` 値 (= 512) で扱う**
 - **T-M3.1 (DiffWaveNext2)**: 4 sub-model それぞれが **独立した** `NoiseEmbedding` を持つ。本チケットでは「sub-model 間で重み共有しない」方針を docstring に明記
 - **T-M3.2 (train_diff.py)**: 各 sub-model の訓練時に `c ~ U(L_k, U_k)` を sample してこの module に渡す。本チケットでは sampling は実装しない (T-M3.1 `sample_noise_level(k, B)` の責務)
@@ -275,8 +286,11 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 
 | 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
 |---|---|---|---|---|
-| **Learnable Fourier feature (NeRF 風)** `exp(2π i · W · c)` with learnable W ~ N(0, σ²) | 連続値の細部の表現力が高い、frequency が train data 統計に適応 | パラメータ追加 (W: `(64, 1)`)、初期化感度が高い、論文 / FastDiff の標準から外れる | FastDiff 標準の sinusoidal を採用。論文再現性最優先 | **M3.5 smoke で sinusoidal で品質が出ない場合** に学習可能化を試す。`NoiseEmbedding(use_learnable_fourier=True)` のフラグ追加で互換性を保つ |
-| **Gaussian Fourier Projection (DDPM 系)** `[sin(2π·B·c); cos(2π·B·c)]` with fixed B ~ N(0, σ²·I) | DDPM/score-based 系で実績、高周波数の表現に強い | σ² の hyperparameter チューニングが追加、初期化乱数依存で再現性に乱数 seed 管理が要る | FastDiff (sinusoidal) と論文整合性を優先 | **score-based 系の vocoder と比較する ablation 時** に試す |
+| **`c * 1000` rescale (DDPM ステップ相当)** (重要): sinusoidal 前に `c_scaled = c * 1000` を適用 | `c ∈ [0, 1]` という極めて小さな入力に対し `freq[0] = 1.0` でも `sin(1.0 * 1.0) = 0.84` で **sin の 1 周期分も使えない** 問題を解消。`log(10000)/63` 周波数 scale は DDPM の `t ∈ [0, 1000]` 整数想定で設計されており、`c * 1000` で本来の動作域に揃う。低周波数 bin (freq < 1) が無駄にならず表現力が回復する | FastDiff 原実装は `c` (∈ [0,1]) をそのまま渡す方針 (FastDiff `util.py::calc_diffusion_step_embedding` の引数 `diffusion_steps` が連続値 c)。論文再現性最優先 | **M3.5 smoke で発散 / 学習不安定 / loss 停滞時の最優先 ablation**。`NoiseEmbedding(input_rescale=1000.0)` フラグ追加で切替可能にしておく。低周波数 bin が無駄になっている点は本質的な懸念で、本チケット §6.1 に重要懸念として追記済み |
+| **`log_scale = log(10000)` を直接調整** (例: `log(100)` に変更し freq[-1] = 0.01 にする) | `c * 1000` rescale 案の代替。freq の range を縮めて c の小ささに適応させる | 全 freq bin の特性が同時に変わり、表現空間の解析性が下がる。`c * 1000` の方が "DDPM 標準に揃える" という解釈で見通しが良い | FastDiff の `log(10000)` を維持し、`c * 1000` の方を ablation 候補とする | 同上 (M3.5 smoke ablation) |
+| **`sin || cos` vs `cos || sin` concat 順序** | Diffusion-LM の論文では `[cos; sin]` 順を採用、Transformer 慣例は `[sin_even; cos_odd]` interleave、FastDiff は `[sin; cos]` | 後段 `Linear(128, 512)` で **permutation invariant** なので学習可能性 / 最終性能に影響しないが、warm-start や ablation 比較時に snapshot SHA256 が変わって混乱する | FastDiff 準拠の `[sin; cos]` 順を採用 (本チケット §5.1 SHA256 pin の一貫性) | **学習済み weight の互換性が問題になった場合** (例えば FastDiff pretrained を warm-start に使う ablation を行うとき)。基本的には再評価不要 |
+| **Learnable Fourier feature (NeRF 風)** `exp(2π i · W · c)` with learnable W ~ N(0, σ²) | 連続値の細部の表現力が高い、frequency が train data 統計に適応。**`c * 1000` rescale が不要になる可能性**もあり、適応的に解決 | パラメータ追加 (W: `(64, 1)`)、初期化感度が高い、論文 / FastDiff の標準から外れる | FastDiff 標準の sinusoidal を採用。論文再現性最優先 | **M3.5 smoke で sinusoidal で品質が出ない場合** に学習可能化を試す。`NoiseEmbedding(use_learnable_fourier=True)` のフラグ追加で互換性を保つ。**`c * 1000` rescale 試行後の二次 ablation 候補** |
+| **Gaussian Fourier Projection (DDPM 系)** `[sin(2π·B·c); cos(2π·B·c)]` with fixed B ~ N(0, σ²·I) | DDPM/score-based 系で実績、高周波数の表現に強い | σ² の hyperparameter チューニングが追加、初期化乱数依存で再現性に乱数 seed 管理が要る | FastDiff (sinusoidal) と論文整合性を優先 | **score-based 系の vocoder と比較する ablation 時** に試す。**`c * 1000` rescale 試行後の二次 ablation 候補** |
 | **Discrete embedding lookup (`nn.Embedding(N_steps, 512)`)** | 学習可能、最も柔軟 | **連続値 c の sampling と非互換** (band 内 uniform sampling を使う本論文では使えない)、推論で schedule の正確な値以外を渡せない | 連続値 conditioning が論文 §3.3 の前提 (band 内 uniform sampling のため) なので採用不可 | **連続性が不要になった場合** (= schedule 点を 4 固定値だけで使う設計に戻す場合)。現状は採用しない |
 | **時刻 t を直接 sin/cos (`sin(c)`, `cos(c)`) のみ、log-spaced 不使用** | 実装が極小 | dim=2 では表現力不足、`half=1` で degeneracy | FastDiff / DDPM の確立された方式 (log-spaced 64 freq + sin/cos = 128 dim) を採用 | **再評価しない** (表現力不足が明らか) |
 | **FC×2 SiLU を FC×3 SiLU に拡張** | 表現力増大 | パラメータ増加 (Linear(512, 512) を 1 段追加で +262,656)、過学習リスク | FastDiff の `Linear(128, 512) + Linear(512, 512)` の **2 段** が標準 | **M3.5 smoke で表現力不足が確認された場合** |
@@ -293,6 +307,13 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
 - **インターフェース定義の見直し余地**:
   - 出力 dim を **default 512** にしておくことで、ConvNeXtBlock の `conditioning_dim` 想定値 (512) と一致しやすい
   - sub-model k = 1..4 のどれであるかを **本モジュールに渡さない** 設計 (sub-model ごとに別 instance を作る方が独立性が高い)
+- **`embed_dim` Single Source of Truth (SoT) の明示**: 現状、以下の **3 箇所** が同期必要:
+  - (1) `NoiseEmbedding.out_dim = 512`
+  - (2) `ConvNeXtBlock.dim = 512`
+  - (3) `ConvNeXtBlock.conditioning_dim = 512`
+
+  将来 `embed_dim` を変更する場合 (例: 256 / 1024 への変更 ablation) の SoT は **`configs/diff_wavenext2.yaml` の `model.sub_model.convnext.embed_dim`** とする。本チケットでは default 512 をハードコードせず、`SubModelDiff` (T-M1.6) の `__init__` で config から両方に伝播する想定で **`NoiseEmbedding(out_dim=embed_dim)` を呼び出す**。本ファイル §9.1 に T-M1.6 / T-M3.1 への申し送りとして明記
+- **`factory` パターンの予約**: T-M1.2 (STFTModule) / T-M1.3 (MelTransform) / T-M1.4 (WaveNextGenerator) と統一して **`NoiseEmbedding.from_config(cfg)` クラスメソッド** を予約 (本チケットでは実装しない、T-M1.6 SubModelDiff 統合時に config 駆動の初期化を導入する際に追加)。これにより `cfg.model.sub_model.noise_embedding` ブロックから一発で `NoiseEmbedding` を構築できる
 - **再評価トリガー**: §8.1 の表を参照
 
 ### 8.3 学んだこと (チケット完了後に追記)
@@ -308,6 +329,9 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
   - `NoiseEmbedding(sinusoidal_dim=128, mid_dim=512, out_dim=512)`
   - `forward(c: (B,)) -> (B, 512)`
   - **入力 c の意味**: `√(1 - ᾱ)` (連続値、`[0, 1]` 区間)。**`ᾱ` そのものや DDPM の integer step t を渡さない**
+- **T-M0.2 conftest.py へ追加要請**:
+  - `set_seed` autouse fixture (毎テスト前に `torch.manual_seed(42)`, `np.random.seed(42)`, `random.seed(42)` を設定) を `tests/conftest.py` に追加
+  - `noise_emb_model` fixture (module scope) は本チケットのテストファイル内に置くか、後続で他テストが再利用するなら `conftest.py` へ昇格
 - **T-M1.6 (SubModelDiff)** が踏まえる経路:
   ```python
   class SubModelDiff(nn.Module):
@@ -322,16 +346,22 @@ c (B,) ──► sinusoidal_embedding(c, dim=128) ──► e (B, 128)
           return self.generator(x, cond=cond)                       # cond → 各 ConvNeXt block の fc_t
   ```
   - `cond` は **8 個の ConvNeXt block すべてに共通で渡る**。各 block の `fc_t` (T-M1.1 内、per-block 独立) が `Linear(512, 512)` で射影して additive bias 化する
+  - **`fc1.bias = 0` zero init の判断**: §6.1「`c=0.0` で `Linear.bias` 支配的になる問題」を踏まえ、T-M1.6 統合時に zero init を採用するか否かを Reviewer が判断 (現状は **FastDiff 準拠 default init** を採用、k=1 sub-model の学習不安定が観測された場合 ablation)
+  - **Linear `bias=True` 採用根拠**: FastDiff `module/FastDiff_model.py` の `DiffusionEmbedding` クラスで `nn.Linear` の default (`bias=True`) を使用している。具体的な行番号と class 名は本実装の docstring / コメントに記載することで根拠をトレース可能にする
+  - **NoiseEmbedding パラメータ数の Table 1 cross-reference**: `NoiseEmbedding` 自身は 0.33M (= 328,704)。Diff sub-model 全体は per-sub-model で 14.42M (論文 Table 1 / `docs/architecture.md` §5)。**Table 1 の 14.42M に NoiseEmbedding 0.33M が含まれているか / 別計上か** を T-M1.6 統合時の Reviewer で再確認 (per-sub-model か all-sub-model 合計かも併せて確認)
 - **T-M1.1 (ConvNeXtBlock) との取り決め**:
   - `ConvNeXtBlock(conditioning_dim=512)` (Diff モード) の `cond` 引数は本チケットの `NoiseEmbedding` の出力をそのまま受け取る
   - `conditioning_dim=512` と本モジュールの `out_dim=512` が **同一値であることをコードレビューで保証**
 - **T-M3.1 (DiffWaveNext2)** との取り決め:
   - 4 sub-model は **独立した** `NoiseEmbedding` を持つ (sub-model 間で重み共有しない)
   - sub-model k の forward 時に `c ~ U(L_k, U_k)` を渡す (`sample_noise_level(k, batch_size)` は T-M3.1 の責務)
+  - **パラメータ数勘定**: 4 sub-model 独立で `NoiseEmbedding` × 4 = **0.33M × 4 = 1.32M**。論文 Table 1 が per-sub-model 表記 (14.42M) なら NoiseEmbedding 0.33M がその内訳に入っているか、全モデル合計 4 × 14.42M = 57.68M に NoiseEmbedding 1.32M が入っているか、**Table 1 cross-check が必要** (T-M1.6 / T-M3.1 で確定)
+- **M3 smoke 発散時の最優先 ablation**: `c * 1000` rescale (DDPM ステップ相当へ rescale、§8.1 参照) を最初に試す。`NoiseEmbedding(input_rescale=1000.0)` フラグで切替できるように設計しておくと ablation が容易
 - **注意事項**:
   - dtype/device は c に追従する (`torch.arange(..., dtype=c.dtype, device=c.device)`)
   - `(B,)` 専用、`(B, 1)` は呼び出し側で `squeeze(-1)` する
   - eval mode / train mode で挙動は変わらない (Dropout/BatchNorm を含まないため)
+  - bf16 推奨、fp16 は `freq[-1] ≈ 1e-4` の underflow リスクをテストで確認した上で使用すること (§6.1)
 
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:

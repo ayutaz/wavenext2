@@ -37,6 +37,10 @@ WaveNeXt-based generator を `src/wavenext2/models/generator.py` に実装する
 - [ ] `tests/test_generator.py` の Unit テストが全 pass (shape / param count / 出力範囲 / 重み初期化 / gradient flow / determinism)
 - [ ] 参考実装 (Vocos / WaveNeXt 非公式 / wetdog) を **コピーしていない** (CLAUDE.md ポリシー準拠)
 - [ ] `docs/milestones.md` §M1.4 Acceptance 4 項目チェック済み
+- [ ] `enable_grad_ckpt=False` (OFF default) 引数を `__init__` に追加、`_apply_grad_ckpt()` スタブを実装 (T-M2.5 smoke で有効化)
+- [ ] `final_activation: str = "clip"` 引数を予約 ("tanh" fallback 用、M3 compile 性能問題時)
+- [ ] `block_factory: type[nn.Module] | None = None` 引数で DI 対応 (M6 ablation 用、test では軽量 MockBlock で <100ms 化)
+- [ ] `WaveNextGenerator.from_config()` factory メソッドを予約 (T-M1.2 / T-M1.3 と一貫化)
 
 ## 2. 実装内容の詳細
 
@@ -93,6 +97,9 @@ class WaveNextGenerator(nn.Module):
         kernel_size: int = 7,
         conditioning_dim: int | None = None,
         layer_scale_init: float = 1e-6,
+        enable_grad_ckpt: bool = False,
+        final_activation: str = "clip",
+        block_factory: type[nn.Module] | None = None,
     ) -> None:
         super().__init__()
         self.input_channels = input_channels
@@ -100,6 +107,11 @@ class WaveNextGenerator(nn.Module):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.conditioning_dim = conditioning_dim
+        self.enable_grad_ckpt = enable_grad_ckpt
+        self.final_activation = final_activation
+        # block_factory: DI. None なら T-M1.1 の ConvNeXtBlock を使う。
+        # M6 ablation (RMSNorm / DyT) で別 block に差し替え可能。テストでも軽量 MockBlock で <100ms 化できる。
+        _BlockCls = block_factory if block_factory is not None else ConvNeXtBlock
 
         # 1. Input embedding: Conv1d(in=C_in, out=dim, k=7, p=3)
         self.embed = nn.Conv1d(
@@ -109,9 +121,9 @@ class WaveNextGenerator(nn.Module):
         # 2. Input LayerNorm (channels_last, applied after transpose)
         self.norm_in = nn.LayerNorm(dim, eps=1e-6)
 
-        # 3. ConvNeXt × n_blocks (T-M1.1 から呼び出し)
+        # 3. ConvNeXt × n_blocks (T-M1.1 から呼び出し、block_factory で差し替え可能)
         self.blocks = nn.ModuleList([
-            ConvNeXtBlock(
+            _BlockCls(
                 dim=dim,
                 intermediate_dim=intermediate_dim,
                 kernel_size=kernel_size,
@@ -132,13 +144,26 @@ class WaveNextGenerator(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        """trunc_normal_(std=0.02), bias=0. ConvNeXt block 内部は block 側で初期化済みなのでスキップ。"""
+        """trunc_normal_(std=0.02), bias=0. T-M1.1 の ConvNeXtBlock は自前 init を持たないため、
+        本クラスの ``self.modules()`` walk が block 内部の `fc_t`, `dwconv`, `pwconv1`, `pwconv2`
+        全てを init する責任を負う (T-M1.1 §9 申し送り)。
+        - ``fc_t.bias = 0`` zero init: noise embedding bias は訓練開始時 0 から学習させる
+        - LayerNorm はデフォルト (weight=1, bias=0) のまま
+        """
         for m in self.modules():
             if isinstance(m, (nn.Conv1d, nn.Linear)):
                 trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             # nn.LayerNorm はデフォルト初期化 (weight=1, bias=0) のまま
+
+    def _apply_grad_ckpt(self, x: torch.Tensor, cond: torch.Tensor | None) -> torch.Tensor:
+        """gradient checkpointing で blocks を 4 segment に分割して計算。
+        T-M2.5 smoke で T=4 sub-model 直列 OOM 時に有効化 (本チケットではスタブ、引数 OFF default)。
+        実装: `torch.utils.checkpoint.checkpoint_sequential(self.blocks, segments=4, input=x)`
+        (cond 付きの場合は wrapper closure で `block(h, cond)` を `block(h)` 化してから渡す)
+        """
+        raise NotImplementedError("T-M2.5 smoke で有効化")
 
     def forward(
         self, x: torch.Tensor, cond: torch.Tensor | None = None,
@@ -148,6 +173,10 @@ class WaveNextGenerator(nn.Module):
             cond: (B, conditioning_dim) or None
         Returns:
             (B, T_mel * hop_length) waveform in [-1, 1].
+
+        Note:
+            ``linear_2.bias is None`` は仕様の一部 (docs/open-questions.md §C2)。
+            元 WaveNeXt poster + wetdog 実装で確定。上位で再 clip / 再 bias 加算しないこと。
         """
         if (self.conditioning_dim is None) != (cond is None):
             raise ValueError(
@@ -193,6 +222,9 @@ class WaveNextGenerator(nn.Module):
 | `layer_scale_init` | 1e-6 | docs/architecture.md §2.1 (Vocos 既定) |
 | 重み初期化 | `trunc_normal_(std=0.02)`, bias=zero | docs/open-questions.md §C2 |
 | 最終 activation | `torch.clip(-1, 1)` (NOT tanh) | docs/open-questions.md §C2 / wetdog 実装 |
+| `enable_grad_ckpt` | False (default) | M1 phase review (T-M2.5 で必要に応じて ON) |
+| `final_activation` | `"clip"` (default), `"tanh"` (fallback) | §8.1 別の設計 (M3 compile 性能問題時) |
+| `block_factory` | `ConvNeXtBlock` (default) | §8.1 別の設計 (M6 ablation で DI) |
 
 ### 2.4 アルゴリズム / 処理フロー
 
@@ -286,6 +318,10 @@ class WaveNextGenerator(nn.Module):
 - [ ] `test_gradient_flow`: GAN/Diff モードで `loss = model(...).abs().mean(); loss.backward()` 実行後、全 `model.parameters()` の `p.grad` が None でなく nan/inf を含まない
 - [ ] `test_deterministic`: `torch.manual_seed(0)` 固定下で同入力に対する出力が 2 回呼び出しで一致 (eval モード必須、dropout なし)
 - [ ] `test_cond_mismatch_raises`: GAN モード (`conditioning_dim=None`) で `cond` を渡すと `ValueError`、Diff モード (`conditioning_dim=512`) で `cond=None` 呼び出しも `ValueError`
+- [ ] `test_param_count_breakdown`: per-module 内訳 dict (`{"embed": N1, "blocks": N2, "linear_1": N3, "linear_2": N4}`) を pin、`embed ≈ 7.34M`、`blocks ≈ 7.0M`、`linear_1 ≈ 1.05M`、`linear_2 ≈ 0.61M` 想定。±5% 許容理由を docstring に文書化
+- [ ] `test_output_range_extreme`: 入力 `*100` だけでなく `*1e6` でも clip が抜けないか確認 (NaN / overflow 飽和の検出)
+- [ ] `test_init_snapshot`: `torch.manual_seed(42)` 固定下で `_init_weights` 後の全 param `state_dict()` を flatten → SHA256 ハッシュ取得、`tests/snapshots/generator_init.json` に pin
+- [ ] (オプション) `test_peak_memory`: `pytest-memray` で `(B=8, T_mel=80)` GAN forward + backward の peak memory を記録、M2.4 の T=4 直列 OOM 予兆を検知
 
 ```python
 # tests/test_generator.py (テスト骨格)
@@ -365,6 +401,12 @@ def test_cond_mismatch_raises(gan_model, diff_model):
         diff_model(x_diff, cond=None)
 ```
 
+### 5.1.1 テスト戦略 (CI / fixture 設計)
+
+- **CI 時間予算**: CPU で 10+ テスト全体で **< 30s**。14M param モデルの `__init__` が支配的なので、`@pytest.fixture(scope="module")` で `gan_model` / `diff_model` を再利用 (T-M0.2 `conftest.py` に登録予定、§9.1 申し送り)
+- **coverage 目標 90%** (`forward` / `_init_weights` / `__init__` のすべての分岐をカバー)
+- **snapshot 配置**: `tests/snapshots/generator_init.json` (SHA256 of state_dict at seed=42) で初期化の deterministic 性を pin
+
 ### 5.2 e2e / 結合テスト
 - [ ] T-M1.6 で `WaveNextGenerator` を sub-model wrapper から呼び出す統合テスト (本チケットの範囲外、T-M1.6 で実施)
 - [ ] 実音声 1 utterance (LibriTTS-R の任意の wav) を mel 抽出 + ダミー STFT-spec (zeros) と結合して forward + backward が成功することは T-M1.6 で実施
@@ -383,6 +425,9 @@ def test_cond_mismatch_raises(gan_model, diff_model):
 | リスク | 影響範囲 | 検知方法 / 緩和策 |
 |---|---|---|
 | **パラメータ数が論文 Table 1 と微妙に異なる** | Acceptance §5.3 で fail。LayerNorm の (weight, bias) 2 要素を含めるか、ConvNeXt block の LayerScale `gamma` を含めるかで差が出る | 内訳を Bash で表示する補助テスト (`test_param_count_breakdown`) を追加。差が ±5% を超えた場合は (a) ConvNeXt block 側でカウントしている param がここでも重複していないか、(b) `bias=True/False` の指定漏れがないか、を確認。最終的には Table 1 の 14.99M / 14.42M を **目安値** として扱い、許容範囲を ±5% にする |
+| **`trunc_normal_(std=0.02)` を `linear_2 (n_fft+2=2050 → hop=300)` に適用すると出力 std ≈ 0.91 で clip 初期飽和** | 訓練序盤に勾配が大半 dead、収束遅延 | M2 smoke で `clip 飽和率 > 50%` (`out.abs().mean() > 0.99`) を計測。閾値超過時のみ `linear_2` 単独で `std = 0.02 / sqrt(hop)` 調整 (Vocos `ISTFTHead` の初期化方針要確認、本チケットでは `std=0.02` 統一で進める) |
+| **`embed` (Conv1d 入口) パラメータ数比重大** | Table 1 14.99M との整合がここの bias 有無一つでブレる | `embed` params = `input_channels * dim * kernel_size + dim` = `2176 * 512 * 7 + 512` ≈ **7.34M**、Generator 全体 14.99M の **半分弱**。`test_param_count_breakdown` で `embed` / `blocks` / `linear_1` / `linear_2` の per-module 内訳を pin、Table 1 整合は `embed.bias=True` と `linear_1.bias=True`、`linear_2.bias=False` のいずれかを変えるだけで簡単にずれることを認識 |
+| **warm-start (Vocos `ISTFTHead`) 互換性** | M2 / M5 で warm-start 試行時、どの param が転送可能かが不明だと debug 不能に陥る | §9.1 で T-M5 への申し送りとして明記。`linear_1.weight/bias` (`(dim=512, n_fft+2=2050)`) は Vocos `ISTFTHead` の `out` Linear と shape 互換だが、`linear_2` は WaveNeXt 独自で Vocos に対応物無し。`embed` は input_channels (mel 128 vs mel+STFT 2176) が異なるため warm-start 不可 |
 | **`Conv1d` の channels-first ↔ ConvNeXt の channels-last 変換** | forward で間違った transpose を入れると shape 不一致や微妙な channel ミックスが発生 | `forward` 内で `transpose(1, 2)` を入れる箇所と回数を明示的にコメント。`test_gan_shape` / `test_diff_shape` が pass すれば検出される |
 | **`linear_1` の Linear が channels-last 入力前提** | `(B, T_mel, 512)` ではなく `(B, 512, T_mel)` のまま `nn.Linear` を通すと最終 dim が C と勘違いされ shape error | `forward` 内で `norm_out` の **後** に必ず `transpose(1, 2)` 済みの状態を維持。コメントで明示。`shape` テストで担保 |
 | **`linear_1` (out=n_fft+2=2050) のメモリ消費** | GAN モードで `(B, T_mel, 2050)` の中間 tensor は大きい (B=16, T_mel=80 で約 10MB / sample / fp32)。本チケットでは問題なくても M2.4 (T=4 直列で `T × 16 × 80 × 2050 = 105MB`) で OOM 候補 | 本チケット時点では問題なし。M2 で `gradient checkpointing` を `WaveNextGenerator` 内 ConvNeXt block 集合に適用するオプションを `enable_grad_ckpt=False` パラメータで予約。docs/milestones.md §リスク表でも明記 |
@@ -433,6 +478,18 @@ def test_cond_mismatch_raises(gan_model, diff_model):
 
 ### 8.1 別の設計を採るとしたら
 
+> **M1 phase review 採用案** (再評価不要、本チケットで実装):
+> - **`enable_grad_ckpt=False` 引数を本チケットで実装** (重要):
+>   - 理由: T-M2 で T=4 sub-model 直列、各 14.99M、`linear_1` 中間 tensor `(B=16, T_mel=80, n_fft+2=2050)` = 10.5MB/sub-model × 4 = 42MB × backward 倍率 ~250MB
+>   - 実装: `block 8 個に torch.utils.checkpoint.checkpoint_sequential` を 4 segment で適用する 5 行のオプション
+>   - `enable_grad_ckpt: bool = False` 引数で OFF default、ON で `_apply_grad_ckpt()` を呼ぶ
+>   - **本チケットでスタブ実装、T-M2.5 smoke で必要に応じて有効化**
+
+> **再評価対象案** (本チケットでは引数のみ予約、有効化判断は後続):
+> - **`final_activation: str = "clip" | "tanh"` 引数で fallback**: `torch.clip` は forward 末尾に `Min/Max` ノードを残し `torch.compile reduce-overhead` で CPU sync。再評価トリガー: **M3 で compile 性能問題**
+> - **`block_factory: Callable = ConvNeXtBlock` 引数 DI**: M6 ablation (RMSNorm / DyT) を 1 引数で実現。テスト時に軽量 MockBlock で <100ms 化
+> - **`WaveNextGenerator` → `Generator` 命名統一案**: T-M1.1 ConvNeXtBlock → Block と対称的に。M1 phase review で議論したが現状 `WaveNextGenerator` 維持 (`from wavenext2.models.generator import Generator` だと汎用名でわかりにくい)
+
 | 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
 |---|---|---|---|---|
 | **出力 head を `ConvTranspose1d` で置換 (HiFi-GAN 風)** | アップサンプリングを Linear ではなく学習可能な転置畳み込みで行えば、より局所的な構造を学べる可能性 | パラメータ数が増える、論文との乖離、Vocos warm-start 不可 | 論文 Fig 2a + 元 WaveNeXt poster で **2 段 Linear** が確定。warm-start のため `linear_1` の `n_fft+2` 次元も Vocos `ISTFTHead` と一致させる設計上の意図あり | **M5 で品質が論文と大きく乖離した場合に ablation 対象として検討** |
@@ -442,7 +499,9 @@ def test_cond_mismatch_raises(gan_model, diff_model):
 | **`linear_1 (dim=512, n_fft+2=2050)` を中間 dim 経由で 2 段化** (例: `Linear(512, 1024) → GELU → Linear(1024, n_fft+2)`) | 表現力が増える可能性 | パラメータ数が増える、warm-start 不可、論文と異なる | 論文準拠 | **M5 で `linear_1` 周辺が表現力 bottleneck と判明した場合** |
 | **`Conv1d` 入力 embedding を 2 段 (Conv1d×2 + LN) に拡張** | より柔軟な特徴抽出 | Vocos / WaveNeXt はいずれも 1 段、論文準拠から逸脱 | Vocos 慣例 + 論文準拠 | **M5/M6 で input ch 数 2176 の Conv1d 単段が bottleneck と profile で判明した場合** |
 | **`conditioning_dim` を生クラス引数ではなく `forward` で動的に受け取る** | 同一インスタンスで GAN/Diff を切り替え可能 | 設計が複雑化、GAN/Diff で別インスタンスを作る方が明快 | 別インスタンス方針で十分 (M2.4 と M3.1 で別途生成) | **M6 で 1 model で GAN + Diff の hybrid 訓練を試す場合のみ** |
-| **`enable_grad_ckpt` を `__init__` 引数に追加して gradient checkpointing 対応** | M2.4 で T=4 直列 OOM 回避 | 本チケットでは未検証、複雑性が増す | 本チケットでは Out of Scope。M2.4 で OOM が確認された時点でフラグ追加 | **M2.4 smoke で OOM 発生時、ConvNeXt block 集合に `torch.utils.checkpoint.checkpoint_sequential` を適用** |
+| **`enable_grad_ckpt` を `__init__` 引数に追加して gradient checkpointing 対応** ✅採用 | M2.4 で T=4 直列 OOM 回避 | 本チケットでは未検証、複雑性が増す | **採用** — 本チケットで OFF default のスタブ実装。T-M2.5 smoke で OOM 発生時に YAML config から有効化 | (再評価不要、本チケットで実装済み) |
+| **`final_activation: str = "clip" \| "tanh"` 引数 fallback** ⏸予約 | `torch.compile reduce-overhead` で `clip` の Min/Max が CPU sync するのを回避 | 論文準拠は clip、tanh は ablation | **引数のみ予約、デフォルト "clip"** | **M3 で compile 性能問題が出た場合に "tanh" 切替** |
+| **`block_factory: Callable = ConvNeXtBlock` 引数 DI** ⏸予約 | M6 ablation (RMSNorm / DyT) を 1 引数で差し替え、テストで軽量 MockBlock 化 | 直接 import に比べわずかに複雑化 | **引数のみ予約、デフォルト `ConvNeXtBlock`** | **M6.3 ablation で別 block 投入時** |
 | **`forward` 内 `transpose` 回数を最小化する設計** (channels_last を維持する) | 計算効率向上の可能性 | `nn.Conv1d` が channels_first 必須、`nn.LayerNorm` が channels_last (last_dim) を期待、`nn.Linear` も channels_last なので transpose は最低限必要 | 現実装の transpose 2 回 (`embed 後` と `last block 後`) が最小構成 | **M6 profiling で transpose が hot path に出た場合のみ** |
 | **`torch.compile` を `__init__` で適用** | 速度向上 | cp313 + torch 2.10 の安定性に懸念、graph break リスク | 本チケットでは触らない。M3 smoke で評価 | **M3 smoke 後、graph break が起きなければ M6 で導入** |
 
@@ -451,6 +510,9 @@ def test_cond_mismatch_raises(gan_model, diff_model):
 - **`ConvNeXtBlock` と分離した設計**: T-M1.1 で別ファイルにした判断は正解。Generator が ConvNeXt 内部実装を知らない契約を維持すれば、後続 ablation (RMSNorm / 別 block) も差し替え可能
 - **`__init__.py` re-export**: `from wavenext2.models import WaveNextGenerator` 形式を許可する場合は `__init__.py` の `__all__` に追加。本チケットではフルパス (`from wavenext2.models.generator import WaveNextGenerator`) でテストするため、re-export は **任意** とする
 - **`forward` の `cond` 引数のオプショナル性**: `Optional[Tensor]` で受け取り、`conditioning_dim` との整合性を `__init__` 時点ではなく `forward` 時点で検証する設計を採用 (lazy validation)。これにより同一クラスで GAN/Diff を区別できる
+- **`linear_2.bias is None` は仕様の一部**: forward 内 docstring に明記 (上記 forward block 参照)、`docs/open-questions.md` §C2 で確定。上位で再 bias 加算しないこと
+- **重み初期化責任**: T-M1.1 Block が自前 init を持たない決定の **対** として、本クラスの `_init_weights` が `self.modules()` walk で全 Conv1d / Linear (Block 内部 `fc_t`, `dwconv`, `pwconv1/2` 含む) を init する責任を負う。`fc_t.bias = 0` zero init は本チケットで適用 (T-M1.1 §9 から申し送り)
+- **factory パターン全モジュール一貫化**: T-M1.2 / T-M1.3 と統一して `WaveNextGenerator.from_config()` を予約 (YAML config dict → `WaveNextGenerator` のシリアライズ統一インターフェース、本チケットでは class method shape のみ提供、実装は T-M1.6 / T-M2.5 で activate)
 - **インターフェース定義**:
   - `forward(x, cond=None) -> Tensor` の signature を T-M1.6 と T-M2.4 / T-M3.1 で共有
   - 戻り値は **常に `(B, T_mel * hop_length)`** (波形と同 shape のノイズ成分)
@@ -467,6 +529,22 @@ def test_cond_mismatch_raises(gan_model, diff_model):
 ## 9. 後続タスクへの連絡事項
 
 ### 9.1 後続チケットに渡す情報
+
+#### T-M0.2 conftest.py へ
+- `@pytest.fixture(scope="module") def gan_model` / `diff_model` を `tests/conftest.py` に共有化 (14M param モデルの再利用、`tests/test_generator.py` と `tests/test_sub_model.py` / `tests/test_gan_model.py` で重複生成を避ける)
+
+#### T-M1.1 から受領
+- ConvNeXtBlock は **自前 init を持たない** ことを T-M1.1 側で決定済み
+- 本クラス `_init_weights` が `self.modules()` walk で Block 内部の `fc_t.bias = 0`, `dwconv`, `pwconv1/2` の init 責任を負う
+
+#### T-M2.5 (train_gan) へ
+- `enable_grad_ckpt=True` を YAML config で切替可能にする責任は T-M2.5 にあり
+- `configs/gan.yaml` に `generator.enable_grad_ckpt: false` キーを追加、smoke で OOM 発生時に `true` に切替
+
+#### T-M5 (smoke) で warm-start 検討
+- `linear_1.weight/bias` (shape: `(n_fft+2=2050, dim=512)` weight / `(n_fft+2=2050,)` bias) を Vocos `ISTFTHead` の対応 Linear と **bit-exact 互換** にする責任を明記
+- `linear_2` (`(hop=300, n_fft+2=2050)`, bias=None) は WaveNeXt 独自で Vocos に対応物無し → warm-start 不可
+- `embed` (Conv1d, input_channels 2176 vs Vocos 128) は input channel 数が異なるため warm-start 不可
 
 #### T-M1.6 (Sub-model wrapper) へ
 - **import 経路**: `from wavenext2.models.generator import WaveNextGenerator`
