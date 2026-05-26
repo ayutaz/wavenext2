@@ -146,11 +146,11 @@ class ConvNeXtBlock(nn.Module):
         ...
 ```
 
-**Acceptance** (`tests/test_convnext.py`):
-- [ ] GAN モード (`conditioning_dim=None`): `block(x)` で入出力 shape `(B, 512, T)` 一致
-- [ ] Diff モード (`conditioning_dim=512`): `block(x, cond)` で動作、cond なし呼び出しは ValueError
-- [ ] パラメータ数: GAN 版 ~1.58M/block (= 1.58M × 8 で約 12.6M)、Diff 版 +0.26M (`Linear(512, 512)`)
-- [ ] gradient flow 確認: `loss = block(x).sum(); loss.backward()` で全パラメータに grad
+**Acceptance** (`tests/test_convnext.py`、2026-05-27 完了、42 件 pass):
+- [x] GAN モード (`conditioning_dim=None`): `block(x)` で入出力 shape `(B, 512, T)` 一致
+- [x] Diff モード (`conditioning_dim=512`): `block(x, cond=...)` で動作、cond なし呼び出しは ValueError (cond は keyword-only)
+- [x] パラメータ数: GAN 版 **1,580,544**/block (= ×8 で 12.64M)、Diff 版 +**262,656** (`Linear(512,512)`)
+- [x] gradient flow 確認: 全パラメータ + cond に grad
 
 ### M1.2 STFT module (`src/wavenext2/models/stft.py`)
 **チケット**: [T-M1.2](tickets/T-M1.2-stft-module.md)

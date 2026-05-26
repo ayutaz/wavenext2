@@ -3,11 +3,11 @@ id: T-M1.1
 title: ConvNeXt block (GAN/Diff 両対応、additive bias 注入)
 milestone: M1
 phase: M1
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M0.1, T-M0.2]
 blocks: [T-M1.4, T-M1.6]
 related_docs:
@@ -387,9 +387,22 @@ size=M (中規模) のため標準編成 (Implementer 1 + Reviewer 1 + Tester 1)
 - **「重み初期化は Generator 側で一括 (apply)」設計の採用根拠**: Block は自前 `_init_weights` を持たない。T-M1.4 Generator の `_init_weights` が `apply()` で walk して Block 内部 (`fc_t`, `dwconv`, `pwconv1/2`, `norm`) を init する責任を持つ前提を明示。理由 (a) Vocos `VocosBackbone` の設計に整合、(b) Generator レベルで `trunc_normal_(std=0.02)` / bias=0 / `fc_t.bias=0` を一元管理できる、(c) Block を別 Generator (将来の variant) に流用する際も init 方針を呼び出し側で制御できる。Block 単体テストでは PyTorch default init のまま動作することのみ確認 (`test_layer_scale_init_value` 以外で初期値 assert はしない)
 - **M1 phase review で API 横断整合性チェック**: M1 完了時に T-M1.1〜T-M1.6 全てを横断レビューし、以下の整合性を確認する: (a) keyword-only `cond` が全 sub-model / Generator で一貫している、(b) factory パターン (現時点では未導入だが将来 `fc_factory` を入れる場合) の命名が `xxx_factory` で統一されている、(c) `cond` / `noise_emb` / `c` の naming が混在していない (推奨: 外部 API は `cond`、内部は `noise_emb`)、(d) `conditioning_dim` の default 値 (None vs 0) が混在していない
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `ConvNeXtBlock` 実装、`tests/test_convnext.py` 42 件 pass (CPU/GPU 両方、device fixture)。
+- **パラメータ数が論文/Vocos と厳密一致**: GAN 1,580,544 / Diff 1,843,200 (差分 fc_t = 262,656)。8 block で GAN 12.64M / Diff 14.75M (block のみ、Generator の Conv1d/Linear/head は別)。
+- `forward(x, *, cond=None)` keyword-only 確定。`test_cond_is_keyword_only` で positional 渡しが TypeError になることを保証。
+- LayerScale γ=1e-6 により初期化直後 `block(x) ≈ x` (residual dominance) を検証。
+
+想定外と対処:
+1. **snapshot は SHA256 でなく JSON 要約 (mean/std/l2) + tolerant 比較に変更**: 理由 (a) `*.pt` は `.gitignore` で除外されベースラインが repo に残らない、(b) 生テンソルの SHA256 は CPU/GPU/BLAS 差で容易に壊れる。`tests/snapshots/convnext_{gan,diff}.json` を commit し rtol 1e-3 で drift 検知。教訓: **snapshot は「committable な text」かつ「float 許容差」で設計する**。
+2. **conftest に autouse seed fixture + device fixture を追加**: `_set_seed` (torch/cuda 42 固定) と `device` (cpu + 利用可能なら cuda) を M1 共通基盤として導入。後続 M1 テストはこれを使う。
+3. **テスト側のパラメータ数理論式で gamma を 1 と誤記** (正しくは dim=512) し一度 fail。実装は正しく、テスト式を修正。教訓: **理論値テストは「実装が間違っているのか式が間違っているのか」を即座に切り分ける** (差分 511 = 512−1 から即特定できた)。
+
+次の似たタスクで応用できる教訓:
+- 重み init を持たない設計 (Generator が `apply()` で一括 init) は単体テストでは PyTorch default init で動く。init 後の挙動検証は T-M1.4 に委譲。
+- device fixture により CPU/GPU 差を 1 度に検出できる (この環境は CUDA 有のため GPU パスも常時検証される)。
 
 ## 9. 後続タスクへの連絡事項
 
