@@ -1,0 +1,113 @@
+# =========================================================================
+# 著作物 (リポジトリ公開時に同梱しない)
+# =========================================================================
+# 論文 PDF / 抽出テキスト / 画像化したページ
+*.pdf
+paper.txt
+paper.pdf
+pdf_pages/
+page_*.png
+
+# 参考実装からダウンロードしたソース (CLAUDE.md で「コピー流用しない」と明記)
+wavenext_orig*
+wavenext_raw*
+wavenext.yaml
+# 上記は本来 configs/wavenext2_*.yaml のみ commit する。誤って外部ファイル名で commit しない
+
+# =========================================================================
+# データセット
+# =========================================================================
+# LibriTTS-R は別途ダウンロード、リポジトリには含めない
+data/LibriTTS_R/
+data/libritts_r/
+*.wav
+*.flac
+*.mp3
+# filelist は commit する (パスのみ)
+!data/filelists/*.txt
+
+# =========================================================================
+# 学習成果物
+# =========================================================================
+checkpoints/
+logs/
+runs/
+wandb/
+tensorboard/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+# pre-trained を残したい場合は明示的に track:
+# !checkpoints/.gitkeep
+
+# 後処理 (post-filter FIR)
+*.npy
+post_filter/*.npy
+
+# =========================================================================
+# Python
+# =========================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# venv / 仮想環境
+.venv/
+venv/
+env/
+ENV/
+
+# テスト・カバレッジ
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# =========================================================================
+# 評価成果物
+# =========================================================================
+eval_results/
+mos_test/
+generated_samples/
+
+# =========================================================================
+# IDE / OS
+# =========================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code 関連 (キャッシュ等)
+.claude/

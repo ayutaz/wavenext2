@@ -1,0 +1,44 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the original paper and this repository."
+title: "WaveNeXt 2 - PyTorch Reproduction"
+abstract: >
+  An unofficial PyTorch reproduction of "WaveNeXt 2: ConvNeXt-Based Fast Neural
+  Vocoders with Residual Denoising and Sub-Modeling for GAN and Diffusion Models"
+  (Zhou et al., arXiv:2605.25506).
+type: software
+authors:
+  - given-names: "Yuta"
+    family-names: "(s19447)"
+    email: "s19447@cyberagent.email"
+license: Apache-2.0
+repository-code: "https://github.com/s19447/wavenext2"
+url: "https://github.com/s19447/wavenext2"
+keywords:
+  - "neural vocoder"
+  - "convnext"
+  - "diffusion"
+  - "gan"
+  - "pytorch"
+  - "speech synthesis"
+  - "text-to-speech"
+preferred-citation:
+  type: article
+  title: "WaveNeXt 2: ConvNeXt-Based Fast Neural Vocoders with Residual Denoising and Sub-Modeling for GAN and Diffusion Models"
+  authors:
+    - given-names: "Wangzixi"
+      family-names: "Zhou"
+    - given-names: "Takuma"
+      family-names: "Okamoto"
+    - given-names: "Yamato"
+      family-names: "Ohtani"
+    - given-names: "Sakriani"
+      family-names: "Sakti"
+    - given-names: "Hisashi"
+      family-names: "Kawai"
+  journal: "arXiv preprint"
+  year: 2026
+  identifiers:
+    - type: other
+      value: "arXiv:2605.25506"
+      description: "arXiv ID"
+  url: "https://arxiv.org/abs/2605.25506"
