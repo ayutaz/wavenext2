@@ -84,6 +84,10 @@ dev = [
 ]
 
 [tool.uv]
+# システム Python (Windows Store 版 / brew 版 / OS 同梱版) を排除し、
+# uv が管理する Python のみを使う。再現性を担保。
+python-preference = "only-managed"
+
 # CUDA wheel index (Linux/Windows 用)。Apple Silicon では index 切り替え不要。
 # torch >= 2.10 で cp313 wheel が提供される版を選択。
 # 暫定: cu126 を採用。CUDA toolkit が cu128 / cu130 なら別 index に切り替える。
@@ -152,7 +156,9 @@ torchaudio = [{ index = "pytorch-cu126", marker = "sys_platform != 'darwin'" }]
 - CUDA toolkit / NVIDIA driver のインストール (OS レイヤの作業はユーザー側)
 - GPU クラスタの環境 (M6 で別途構築)
 - UTMOS / NISQA 用の別 venv 構築 (`docs/milestones.md` §リスク表で言及、必要時に別チケット化)
-- CI ワークフロー (.github/workflows) のセットアップ (将来チケット化)
+- CI ワークフロー (`.github/workflows/`)・pre-commit hook (`.pre-commit-config.yaml`)・`.gitattributes`・`.env.example`・`src/utils/seed.py` stub の placeholder commit → **T-M0.2 (scaffold) に申し送り** (§9.1 参照)
+- `Dockerfile` / `.devcontainer/` の雛形 → T-M0.2 (scaffold) または M5/M6 着手時のクラウド移行チケットに申し送り
+- `uv export --format requirements.txt > requirements-frozen.txt` の生成 → M6 起動時に必要なら別チケット化
 
 ### Deliverable
 - ファイル:
@@ -178,6 +184,7 @@ torchaudio = [{ index = "pytorch-cu126", marker = "sys_platform != 'darwin'" }]
 - [ ] **E3**: `uv run python -c "import torch; assert torch.__version__ >= '2.10', torch.__version__; assert torch.cuda.is_available(), 'CUDA not available'; print(torch.__version__, torch.cuda.is_available())"` が成功
 - [ ] **E4**: `uv run python -c "import torchaudio; backends = torchaudio.list_audio_backends(); assert 'sox_io' in backends, backends; print(backends)"` が成功
 - [ ] **E5**: `uv run python -c "import pyworld, librosa; print(pyworld.__version__, librosa.__version__)"` がエラーなく完走
+- [ ] **E6** (Windows 開発機): `uv run python -c "import soundfile; print(soundfile.__version__)"` がエラーなく完走 (libsndfile DLL の存在確認)。**Linux/Mac では skip 可能**。§6.1 の `soundfile` Windows DLL 問題リスクに対応
 
 GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_available()` のチェックを `os.environ.get("WAVENEXT2_SKIP_CUDA_CHECK")` でスキップ可能にする (将来の CI 用)。本チケットでは検証する開発機に CUDA GPU がある前提。
 
@@ -201,6 +208,12 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
 | **pyworld の wheel が cp313 で見つからない** | `uv add pyworld` が失敗 | pyworld 本家 (PyPI `pyworld>=0.3.4`) は cp313 wheel を提供している前提。万一無ければ §8.1 の代替案 (`pyworld-prebuilt` fork or Python 3.12 ダウングレード) を検討 |
 | **librosa の依存 (numba) が numpy 2.x 非互換** | `import librosa` で ImportError | librosa 0.11.0 系は numpy 2.x 対応済。`numpy>=2,<3` を明示的にピンする必要があれば `pyproject.toml` に追記 |
 | **`uv.lock` の OS 依存** | clone 環境で `uv sync` が再現しない | `uv` は cross-platform lock をサポートしている (v0.4+)。`uv.lock` をそのまま使う。差異が出たら `uv lock --upgrade` で再生成 |
+| **`uv.lock` のクロスプラットフォーム挙動 (Windows 開発 / Linux A100)** | Windows と Linux で解決される wheel が分岐し、M6 で SSH 先 A100 環境の `uv sync` が想定外の依存に解決される可能性 | M6 着手前に Linux 側で `uv sync --frozen` を試し、`uv.lock` の universal resolver mode で問題が出れば platform-specific lock (`uv.linux.lock`) を別途用意。`uv lock --python-platform x86_64-unknown-linux-gnu` の挙動も検証 |
+| **`pymcd` cp313 wheel 未提供リスク** | `uv add pymcd` が build 失敗 (cp313 wheel が無いと sdist からの local build に落ちる) | M0 で wheel 提供状況を確認。build 失敗時は `mel-cepstral-distance>=0.0.4` (より枯れた純 Python 実装) への代替を検討。**`pyproject.toml` の dependencies は最終的に pymcd / mel-cepstral-distance のいずれかに確定する** (M4 評価インフラ着手時に再確認) |
+| **`torch.compile` の cp313 サポート成熟度** | ConvNeXt 系で `torch.compile` の高速化恩恵が大きい (Vocos が利用) が、cp313 + torch 2.10 系で graph break やバックエンドの不安定が報告されている可能性 | M3 (Diff-WaveNeXt 2 smoke) で `torch.compile` 経由の forward/backward が落ちたら **Python 3.12 へ降格するトリガー**として位置づける。降格判断時は §8.1 の代替案を再評価 |
+| **`cudnn.benchmark` / `torch.backends.cudnn.deterministic` 方針未定** | MR-STFT で nondeterministic CUDA kernel に当たり再現性が落ちる / 速度が安定しない | 本チケットでは具体的な値設定はしないが、`configs/` (T-M0.2 で配置) の global 設定 key (`cudnn.benchmark`, `cudnn.deterministic`) を **予約**しておく。M1 で `src/utils/seed.py` 実装時に同時に決定 |
+| **`OMP_NUM_THREADS` / `MKL_NUM_THREADS` のオーバーサブスクリプション** | DataLoader worker × BLAS で CPU 100% 張り付き → I/O 詰まり / 学習速度低下 | `.env.example` 雛形 (T-M0.2 で配置) に `OMP_NUM_THREADS=1` / `MKL_NUM_THREADS=1` のデフォルトを書く方針を T-M0.2 に申し送る (本チケットでは `.env` を作成しない) |
+| **`soundfile` (libsndfile) Windows DLL 問題** | Windows で `import soundfile` が `OSError: cannot load library 'libsndfile.dll'` で失敗するケース。本プロジェクトは `torchaudio.sox_effects.apply_effects_tensor` で `norm` を使う設計だが、`soundfile` 経由の I/O も dataset 側で発生する | §5.2 Acceptance に `uv run python -c "import soundfile; soundfile.read"` を追加する案を検討 (E6 として後述) |
 
 ### 6.2 仕様の曖昧さ
 - `docs/open-questions.md` §C8 はトレーニングハイパーパラメータの確定情報を持つが、Python バージョン・依存ライブラリ version は記載されていない。**本チケットの決定 (Python 3.13, torch>=2.10) を `docs/implementation-plan.md` §1 と `docs/milestones.md` §M0.1 で既に明文化済みなので、ここでは追加の決定なし**。
@@ -220,7 +233,7 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
 - [ ] `uv.lock` がリポジトリに commit されているか (`.gitignore` に誤って入れていないか)
 - [ ] `.gitignore` で `.venv/`, `__pycache__/`, `*.pyc`, 論文関連の一時ファイル (`paper.pdf` 等) を除外しているか
 - [ ] CUDA wheel index (`[[tool.uv.index]]` / `[tool.uv.sources]`) が `nvidia-smi` の driver version に対応しているか
-- [ ] §5.2 の E1〜E5 全ての e2e 検証が Bash で成功しているか (出力ログを残す)
+- [ ] §5.2 の E1〜E5 全ての e2e 検証が Bash で成功しているか (出力ログを残す)。Windows 開発機の場合は E6 (`soundfile` import) も成功しているか
 - [ ] `docs/milestones.md` §M0.1 と本チケットの Acceptance に差異がないか (転記漏れ)
 - [ ] 参考実装 (Vocos, WaveFit-PT, FastDiff, wavenext-impl) のコードを **コピーしていない** か (本チケットは pyproject 雛形のみで該当箇所はないが、CLAUDE.md ポリシー再確認)
 - [ ] Python 3.13 を選んだ理由 (cp314 で pyworld wheel が無いこと) がチケット §6.1 や `docs/milestones.md` §M0.1 で記述されているか
@@ -231,19 +244,26 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
 
 ### 8.1 別の設計を採るとしたら
 
-| 別案 | メリット | デメリット | 採用しなかった理由 |
-|---|---|---|---|
-| **conda + `environment.yml`** | CUDA toolkit ごと conda env に同梱できる | 解決速度が遅い、`pyproject.toml` の標準形式から逸脱、`uv.lock` 相当の lockfile 機構が弱い、`conda-forge` と `pip` のミックスでビルド再現性が落ちる | `docs/implementation-plan.md` §1 で uv 採用を既に決定済み |
-| **`pyproject.toml` + Poetry** | エコシステムが成熟、企業利用例が多い | uv (Rust 実装) より 10〜100 倍遅い、Python 3.13 サポートが遅い、PyTorch CUDA wheel index 切り替えが複雑 | Poetry より uv の方が高速かつ PEP 621 ネイティブ。`docs/milestones.md` で uv 採用済み |
-| **`requirements.txt` + venv (pip)** | 最もシンプル、Python 標準のみ | lockfile (`pip freeze`) が cross-platform でない、依存 resolver が弱い、開発依存と本番依存の分離が手動 | 再現性が要件のため不採用 |
-| **Docker + uv** | 全環境を Docker image に同梱 → ホスト OS 非依存。M6 (GPU クラスタ) で特に有用 | 開発機での hot-reload 開発体験が悪化、GPU passthrough (`--gpus all`) の設定が必要 | **将来 (M6 移行時) に検討する余地あり**。本チケットではローカル開発を最優先するため見送り |
-| **Python 3.12 にダウングレード** | numpy 2.x との互換性が枯れている、pyworld・librosa の wheel が確実に揃う、PyTorch 2.10 以前 (2.4/2.5) も使える | 寿命が短い (3.12 は 3.13 より早く EOL)、3.13 で改善した GIL 周りの将来性を捨てる | Python 3.13 は GA 済み・主要ライブラリの wheel も出揃った段階。3.13 を採用しつつ、wheel 問題で詰まった場合のみ 3.12 にフォールバック |
-| **Python 3.14 を採用 (`pyworld-prebuilt` 等 fork で wheel 補完)** | 最新版、free-threaded ビルドも視野 | サードパーティ fork はメンテナンス不安定、論文再現性の文脈で「外部 fork に依存」する説明コストが高い、librosa 0.11.0 の classifier が 3.13 までしか明示していない | `docs/milestones.md` §M0.1 の方針通り 3.13 を採用。`pyworld` 本家が cp314 wheel を出した時点で改めて 3.14 への移行を検討 |
+| 別案 | メリット | デメリット | 採用しなかった理由 | 再評価トリガー |
+|---|---|---|---|---|
+| **conda + `environment.yml`** | CUDA toolkit ごと conda env に同梱できる | 解決速度が遅い、`pyproject.toml` の標準形式から逸脱、`uv.lock` 相当の lockfile 機構が弱い、`conda-forge` と `pip` のミックスでビルド再現性が落ちる | `docs/implementation-plan.md` §1 で uv 採用を既に決定済み | **再評価しない** (uv 方針を撤回する理由がなければ固定) |
+| **`pyproject.toml` + Poetry** | エコシステムが成熟、企業利用例が多い | uv (Rust 実装) より 10〜100 倍遅い、Python 3.13 サポートが遅い、PyTorch CUDA wheel index 切り替えが複雑 | Poetry より uv の方が高速かつ PEP 621 ネイティブ。`docs/milestones.md` で uv 採用済み | **再評価しない** |
+| **`requirements.txt` + venv (pip)** | 最もシンプル、Python 標準のみ | lockfile (`pip freeze`) が cross-platform でない、依存 resolver が弱い、開発依存と本番依存の分離が手動 | 再現性が要件のため不採用 | **再評価しない** |
+| **Docker + uv** | 全環境を Docker image に同梱 → ホスト OS 非依存。M6 (GPU クラスタ) で特に有用 | 開発機での hot-reload 開発体験が悪化、GPU passthrough (`--gpus all`) の設定が必要 | **将来 (M6 移行時) に検討する余地あり**。本チケットではローカル開発を最優先するため見送り | **M5/M6 着手前** (クラウド移行が見えた時) に再評価。`Dockerfile` 雛形を T-M0.2 scaffold スコープで commit する案あり |
+| **devcontainer (`.devcontainer/devcontainer.json`)** | 新メンバー onboarding が一発、GitHub Codespaces / VS Code Remote-Containers で動作 | Docker 依存、本プロジェクトはチーム規模が小さく onboarding コストが低いので priority 低い | 現状は不採用。T-M0.2 (scaffold) で placeholder commit する案を申し送り | **新メンバー参画時** または **Codespaces 利用要求が発生したとき** |
+| **`pixi` (conda + uv ハイブリッド)** | CUDA toolkit を env 内に閉じ込められる、conda-forge の科学計算系 wheel を使える | エコシステムが新しく、`pyproject.toml` 標準から離れる。uv + pyproject.toml のシンプルさを優先 | uv + pyproject の標準路線を優先 | **pixi が PyTorch CUDA wheel index 切り替えで明確な優位性を示したとき** |
+| **uv export → `requirements-frozen.txt` 補助 deliverable** | SageMaker / Vast.ai 等 uv 未サポート環境への移植性保険 | uv.lock + requirements.txt の二重管理になる | 本チケットでは Out of Scope。`uv export --format requirements.txt > requirements-frozen.txt` を生成する手順を M6 起動時に検討 | **M6 で uv 未サポートな商用 GPU 環境 (SageMaker 等) を採用するとき** |
+| **Python 3.12 にダウングレード** | numpy 2.x との互換性が枯れている、pyworld・librosa の wheel が確実に揃う、PyTorch 2.10 以前 (2.4/2.5) も使える | 寿命が短い (3.12 は 3.13 より早く EOL)、3.13 で改善した GIL 周りの将来性を捨てる | Python 3.13 は GA 済み・主要ライブラリの wheel も出揃った段階。3.13 を採用しつつ、wheel 問題で詰まった場合のみ 3.12 にフォールバック | **M3 で `torch.compile` が cp313 で落ちたとき**、または **M4 で `pymcd` cp313 build に失敗し代替もなく解決不能なとき** |
+| **Python 3.14 を採用 (`pyworld-prebuilt` 等 fork で wheel 補完)** | 最新版、free-threaded ビルドも視野 | サードパーティ fork はメンテナンス不安定、論文再現性の文脈で「外部 fork に依存」する説明コストが高い、librosa 0.11.0 の classifier が 3.13 までしか明示していない | `docs/milestones.md` §M0.1 の方針通り 3.13 を採用。`pyworld` 本家が cp314 wheel を出した時点で改めて 3.14 への移行を検討 | **pyworld 本家が cp314 wheel を PyPI に publish したとき** (定期的に PyPI を確認、目安は四半期に一度) |
 
 ### 8.2 思想 / 哲学の見直し
 - **粒度**: T-M0.1 は size=S と妥当。`pyproject.toml` 作成 + uv 操作 + 5 項目の Acceptance 検証で 1〜2 時間程度の作業量。**分割する必要なし**。
 - **scaffold 分離の正当性**: T-M0.2 (ディレクトリ作成) を本チケットに統合する案もあったが、`pyproject.toml` のレビュー観点と `src/` ツリーのレビュー観点が独立しているため、別チケットとした方が PR が小さくなり健全。
 - **インターフェース定義の見直し余地**: `uv` のエントリポイント (`uv run python`, `uv run pytest`) を全チケットで統一する方針は維持。`uv tool run` (グローバル tool) は本プロジェクトでは使わない。
+- **`Makefile` / `justfile` ラッパ層**: `make train-gan` のようなショートカットを用意する案。**現時点では YAGNI として却下** — uv コマンド (`uv run python -m src.train.train_gan`) が十分短く、ラッパを挟むと依存追加 (make / just) が新たに発生する。M6 起動時 (cron / sbatch スクリプト整備時) に再評価。
+- **`[project.scripts]` entry points** (例: `train-gan = "src.train.train_gan:main"`): `pyproject.toml` に entry point を書けば `uv run train-gan` で起動できる。**現状不採用** — `uv run python -m src.train.train_gan` で十分かつ debug 時に `-m` 形式の方が stack trace が読みやすい。M6 起動の安定後に検討。
+- **乱数 seed 集約方針**: 本チケットでは予約のみ。`src/utils/seed.py` を T-M0.2 で空 stub 配置し、M1 以降で PyTorch / numpy / random / CUDA (cuda manual seed, cudnn deterministic) の seed を一括設定する設計を予告する。`set_seed(seed: int, deterministic: bool = False)` のような API を想定。
+- **`[tool.uv] python-preference = "only-managed"`**: システム Python (Windows Store 版 / brew 版 / OS 同梱版) を排除し、uv が管理する Python のみを使う設定。再現性を担保するため **本チケットの `pyproject.toml` で明示**する。**判断**: 採用。`uv venv --python 3.13` の自動 Python ダウンロードと組み合わせれば、開発機ごとに微妙に異なる Python ビルドを排除できる。
 
 ### 8.3 学んだこと (チケット完了後に追記)
 - 実装中に判明した想定外: (未着手)
@@ -262,6 +282,16 @@ GPU が無い環境 (CI 等) で E3 を実行する場合は `torch.cuda.is_avai
 - **注意事項**:
   - `.venv/` は OS 依存のためマシン間で共有しない。必ず `uv sync` で再生成する
   - PyTorch CUDA wheel index は `[tool.uv.sources]` で切り替える。開発機交代時に CUDA driver version が変わったら本チケットを再開して `[[tool.uv.index]]` を更新
+
+#### T-M0.2 (scaffold) への申し送り (placeholder commit 依頼)
+
+- **CI ワークフロー雛形**: `.github/workflows/test.yml` に `astral-sh/setup-uv@v3` + `actions/cache@v4` を組み込んだ placeholder。`uv sync --frozen` → `uv run pytest` の最小フローを書く。
+- **`uv.lock --check` を CI で必須化**: `uv lock --check` (lockfile が最新かを CI で検証) を上記 workflow に組み込む。PR で `pyproject.toml` を編集して `uv.lock` を更新し忘れた場合に検知。
+- **`.pre-commit-config.yaml`**: ruff format / ruff check / end-of-file-fixer / trailing-whitespace の最小構成 placeholder。
+- **`.gitattributes`**: `* text=auto eol=lf` を書き、CRLF/LF の差分混入を防ぐ。Windows 開発 / Linux A100 の混在環境で特に重要。
+- **`pip-licenses` (もしくは `uv tool run pip-licenses`) license audit**: workflow に組み込んで GPL / AGPL コンタミ検知。本リポジトリは公開予定 (MIT) のため、依存に GPL が混入すると license 競合が発生する。
+- **`.env.example` 雛形**: `OMP_NUM_THREADS=1` / `MKL_NUM_THREADS=1` のデフォルトを書く (DataLoader worker × BLAS のオーバーサブスクリプション対策)。実際の `.env` は `.gitignore` で除外。
+- **`src/utils/seed.py` 空 stub**: 乱数 seed 集約 stub。`set_seed(seed: int, deterministic: bool = False) -> None` の signature だけ予約。中身は M1 以降で実装。
 
 ### 9.2 ドキュメント更新
 - 完了時に更新するドキュメント:
