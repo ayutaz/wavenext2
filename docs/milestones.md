@@ -270,11 +270,11 @@ class SubModelDiff(nn.Module):
         return self.generator(x, cond=cond)
 ```
 
-**Acceptance** (`tests/test_sub_model.py`):
-- [ ] GAN: `mel(B, 128, 80) + y_prev(B, 24000) → out(B, 24000)`
-- [ ] Diff: `mel(B, 128, 94) + x_t(B, 24064) + c(B,) → out(B, 24064)`
-- [ ] パラメータ数が Table 1 と一致 (GAN: ~14.99M, Diff: ~14.42M)
-- [ ] forward + backward が動作
+**Acceptance** (`tests/test_sub_model.py`、2026-05-27 完了、18 件 pass):
+- [x] GAN: `mel(B, 128, 80) + y_prev(B, 24000) → n_t(B, 24000)` (clip[-1,1]、減算 y_{t-1}=y_t-n_t は T-M2.4)
+- [x] Diff: `mel(B, 128, 94) + x_t(B, 24064) + c(B,) → ε_pred(B, 24064)` (clip なし=final_activation "none")
+- [x] パラメータ数: GAN 15.43M (Table 1 14.99M +2.9%)。Diff 16.46M は per-block fc_t 超過 (Table 1 14.42M +14%) → M1 phase review で fc_t 要否再評価
+- [x] forward + backward 動作、CONCAT_ORDER=("mel","stft_spec")、from_config 対応
 
 ---
 

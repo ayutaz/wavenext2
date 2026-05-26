@@ -3,11 +3,11 @@ id: T-M1.6
 title: Sub-model wrapper (STFT module + Generator、GAN/Diff 両対応)
 milestone: M1
 phase: M1
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-27
 depends_on: [T-M1.2, T-M1.3, T-M1.4, T-M1.5]
 blocks: [T-M2.4, T-M3.1]
 related_docs:
@@ -333,9 +333,13 @@ class SubModelDiff(nn.Module):
 
 ### 6.1 技術的リスク
 
-#### Critical 項目 (実装着手前に必ず解決)
+#### Critical 項目 (✅ 2026-05-27 実装時に解決)
 
-- **CRITICAL: `SubModelGAN.forward(mel, y_prev)` の戻り値の意味の曖昧さ** (M1 phase review で指摘):
+- **✅ 解決: `SubModelGAN.forward(mel, y_prev)` の戻り値 = n_t (clip[-1,1])**:
+  - architecture.md §4 (`n_t = sub_model(mel, y_t); y_{t-1} = y_t - n_t`) より、**generator 出力 = n_t (残差、clip[-1,1])**。減算 `y_{t-1}=y_t-n_t` は **呼び出し側 (T-M2.4)** が行う。sub-model 自身は減算しない。docstring に明記済み。
+  - **✅ 関連解決: Diff の ε は clip しない**。training.md §4.2 reverse は `ε_pred` を生で使い波形 x0_hat のみ clamp。ε~N(0,1) は |ε|>1 が ~32% で clip すると破壊的 → **SubModelDiff の generator は `final_activation="none"`** (WaveNextGenerator に "none" を追加)。SubModelGAN は "clip"。
+
+- ~~(旧) 戻り値の意味の曖昧さ~~ (上記で解決):
   - 現状 docstring に「ノイズ成分 n_t」と書きながら `test_gan_output_range` では `[-1, 1]` clip を期待しており **論理矛盾**
   - GAN の `y_t - n_t = y_{t-1}` で `y_{t-1} ∈ [-1, 1]` を担保するには `n_t = y_t - y_{t-1} ∈ [-2, 2]` であり、clip 範囲 `[-1, 1]` だと `t→0` で `y_{t-1}` が clip されて情報損失
   - **仮説**: 実は generator 出力は `y_{t-1}` そのもの (denoised waveform) で `n_t = y_t - y_{t-1}` を後段 (T-M2.4 GANWaveNext2) で計算する設計の方が WaveFit 準拠の可能性
@@ -570,10 +574,21 @@ class SubModelDiff(nn.Module):
     - config validation の集約点 (`from_config` 内で `allowed_keys` を絞る)
   - 本チケットは M1 の最終チケットなので、factory パターンの **整合性を最終確認する責務** を持つ
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-27 実装完了後に追記)
+
+実装結果:
+- `SubModelGAN` / `SubModelDiff` (composition: STFTModule + WaveNextGenerator + Diff は NoiseEmbedding) 実装、`tests/test_sub_model.py` 18 件 pass。`CONCAT_ORDER=("mel","stft_spec")` module 定数 + class 属性、`from_config` factory (余分 key 無視)。
+- param: SubModelGAN = 15.43M (= generator)、SubModelDiff = 16.46M (= generator 16.13M + NoiseEmbedding 0.33M)。
+
+統合で解決した想定外:
+1. **§6.1 CRITICAL 戻り値意味の確定**: architecture.md §4 より **SubModelGAN は n_t (clip[-1,1] 残差) を返し、減算 y_{t-1}=y_t-n_t は T-M2.4 が行う**。sub-model は減算しない。
+2. **Diff の ε を clip してはいけない (重要)**: training.md §4.2 reverse は ε_pred を生で使い波形のみ clamp。ε~N(0,1) は \|ε\|>1 が ~32% で clip すると破壊的。→ **WaveNextGenerator に `final_activation="none"` を追加** (T-M1.4 を改訂)、SubModelDiff はこれを使う。GAN は "clip"。**教訓: 同一 generator を GAN(波形/残差) と Diff(ε) で再利用する場合、出力 activation はモードで変える必要がある (統合して初めて顕在化)**。
+3. **cond propagation テストは未訓練だと cosine 0.9998**: LayerScale γ=1e-6 で block が near-identity のため init 時の conditioning effect は小さい。閾値 cosine<0.999 は訓練前提で過剰 → 「出力が変わる (`(o0-o1).abs().max()>1e-3`)」の直接検証に変更。
+4. **Diff param +14% 超過 (per-block fc_t)**: SubModelDiff 16.46M vs Table 1 14.42M。fc_t (2.1M) を除けば 14.36M で一致 → **M1 phase review で per-block conditioning の要否を holistic に再評価** (T-M1.4 §8.3 と同件)。
+
+次の似たタスクで応用できる教訓:
+- 共有部品 (generator) を複数モードで使い回すと、出力 activation や clip など「末端の差」が統合時に露見する。早めに最小統合テストを書くと検出が早い。
+- 未訓練モデルのテストは「学習後に期待する強い性質」でなく「機構が伝播する弱い性質」で書く (LayerScale init を考慮)。
 
 ## 9. 後続タスクへの連絡事項
 

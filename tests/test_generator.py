@@ -127,6 +127,21 @@ def test_final_activation_tanh():
     assert out.min() >= -1.0 and out.max() <= 1.0  # tanh も [-1,1]
 
 
+def test_final_activation_none_unbounded():
+    # Diff の ε 予測用: clip しないので |out|>1 を許容する
+    g = WaveNextGenerator(
+        input_channels=1152,
+        n_fft=1024,
+        hop_length=256,
+        conditioning_dim=None,
+        final_activation="none",
+    )
+    g._init_weights()  # 既定 init は std 小さく出力が小さいので、大入力で範囲を出す
+    out = g(torch.randn(2, 1152, 40) * 1e4)
+    assert torch.isfinite(out).all()
+    assert out.abs().max() > 1.0  # clip されていない
+
+
 def test_invalid_final_activation():
     with pytest.raises(ValueError, match="final_activation"):
         WaveNextGenerator(input_channels=1152, n_fft=1024, hop_length=256, final_activation="relu")

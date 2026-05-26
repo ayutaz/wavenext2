@@ -36,7 +36,8 @@ class WaveNextGenerator(nn.Module):
         conditioning_dim: None=GAN, 512=Diff (additive bias)。
         layer_scale_init: ConvNeXt LayerScale 初期値 (1e-6)。
         embed_kernel_size: 入力 embed Conv1d の kernel。既定 1 (Table 1 整合、上記参照)。
-        final_activation: "clip" (既定) / "tanh" (M3 compile fallback 予約)。
+        final_activation: "clip" (既定、GAN の波形/残差出力) / "tanh" (M3 compile fallback 予約) /
+            "none" (Diff の ε 予測など unbounded 出力。ε~N(0,1) は clip すると破壊的)。
         block_factory: ConvNeXtBlock 差し替え用 DI (None で既定)。
     """
 
@@ -56,8 +57,10 @@ class WaveNextGenerator(nn.Module):
         block_factory: type[nn.Module] | None = None,
     ) -> None:
         super().__init__()
-        if final_activation not in ("clip", "tanh"):
-            raise ValueError(f"final_activation must be 'clip' or 'tanh', got {final_activation}")
+        if final_activation not in ("clip", "tanh", "none"):
+            raise ValueError(
+                f"final_activation must be 'clip', 'tanh' or 'none', got {final_activation}"
+            )
         self.input_channels = input_channels
         self.dim = dim
         self.n_fft = n_fft
@@ -124,4 +127,6 @@ class WaveNextGenerator(nn.Module):
         h = h.reshape(b, t_mel * self.hop_length)
         if self.final_activation == "tanh":
             return torch.tanh(h)
+        if self.final_activation == "none":
+            return h  # unbounded (Diff の ε 予測など)
         return torch.clip(h, min=-1.0, max=1.0)
