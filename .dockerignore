@@ -1,0 +1,25 @@
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# データ・成果物 (image に含めない)
+data/
+checkpoints/
+logs/
+runs/
+wandb/
+eval_results/
+mos_results/
+generated_samples/
+
+# 著作物・secrets
+*.pdf
+paper.txt
+pdf_pages/
+.env
+
+docs/

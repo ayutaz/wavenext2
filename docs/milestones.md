@@ -93,8 +93,12 @@ tests/{test_convnext.py, test_stft_module.py, test_generator.py,
 scripts/{prepare_libritts.py, extract_mel.py, fit_post_filter.py}
 ```
 
-**Acceptance**:
-- [ ] 上記ツリーが作成され、各 `__init__.py` が空ファイルで存在
+**Acceptance** (2026-05-27 完了):
+- [x] 上記ツリーが作成され、各 `__init__.py` が `__all__` 予約コメント付きで存在 (`src/wavenext2/` パッケージ化)
+- [x] `wavenext2.{models,data,losses,train,inference,eval,utils}` 全 import OK (editable install)
+- [x] `pytest tests/ --collect-only` で 6 placeholder collect (exit 0)、実行で全 skip
+- [x] `ruff check` / `ruff format --check` 通過、scaffold.py 再実行で冪等 (51 skip)
+- [x] 追加 stub: Docker / `.devcontainer` / CI (`.github/workflows`) / `.pre-commit-config.yaml` / `.gitattributes` / `.env.example` / `.gitkeep` x7
 
 **ユーザー操作**: 不要。
 

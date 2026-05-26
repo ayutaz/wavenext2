@@ -1,0 +1,88 @@
+# =============================================================================
+# Diff-WaveNeXt 2 設定 (ドラフト)
+# docs/implementation-plan.md §5 の雛形を反映。M3.2 (訓練スクリプト) で完成形へ。
+# secrets (API key 等) は書かない — .env / 環境変数経由で読み込む。
+# =============================================================================
+model:
+  type: diff_wavenext2
+  num_sub_models: 4
+  noise_schedule: [1.0e-04, 2.8e-02, 5.6e-01, 9.1e-01]   # ᾱ_1..ᾱ_4 (PDF 明示, denoising 順で増加)
+  partition: point_specialized                            # 1-to-1 mapping (architecture.md §5)
+  band_boundaries:                                        # √(1-ᾱ) 軸での train sampling band
+    sub_model_1: [0.9929, 1.0]      # ᾱ ≈ 1e-4 周辺
+    sub_model_2: [0.8246, 0.9929]   # ᾱ ≈ 2.8e-2 周辺
+    sub_model_3: [0.4817, 0.8246]   # ᾱ ≈ 5.6e-1 周辺
+    sub_model_4: [0.0, 0.4817]      # ᾱ ≈ 9.1e-1 周辺
+  sub_model:
+    n_mels: 128
+    sample_rate: 24000
+    hop: 256                    # Diff は FastDiff に揃え 256
+    n_fft: 1024
+    win_length: 1024
+    f_min: 20
+    f_max: 12000
+    mel:
+      power: 1.0
+      mel_scale: slaney
+      norm: slaney
+      log_eps: 1.0e-5
+    stft_module:
+      n_fft: 1024               # mel と同一
+      win_length: 1024
+      hop: 256
+      window: hann
+      center: true
+      normalized: false
+    convnext:
+      n_blocks: 8
+      embed_dim: 512
+      intermediate_dim: 1536
+      kernel_size: 7
+      layer_scale_init: 1.0e-6
+    head:
+      linear1_out: 1026         # = n_fft + 2
+      linear1_bias: true
+      linear2_out: 256          # = hop_length
+      linear2_bias: false
+      output_clip: [-1.0, 1.0]
+    init: trunc_normal_0.02
+    noise_level_embedding:      # FastDiff `module/FastDiff_model.py` で確定
+      sinusoidal_dim: 128       # log(10000)/63 log-spaced, sin||cos
+      fc1: [128, 512]
+      fc2: [512, 512]
+      activation: silu          # swish = SiLU
+      injection: additive_bias  # NOT FiLM
+      per_block_projection: true  # 各 ConvNeXt block ごとに独立 Linear(512, 512)
+  post_filter:
+    enabled: true
+    type: time_invariant_spectral_enhancement   # Okamoto21 §3
+    n_fft: 512
+    hop: 256
+    window: hann
+    fir_length: 512
+    fit_dev_set_size: 200       # dev_postfilter.tsv の件数 (T-M0.3)
+train:
+  batch_size: 20
+  segment_length: 25600         # FastDiff 準拠
+  num_workers: 4
+  max_steps_per_sub_model: 1_000_000
+  grad_clip_norm: 1.0
+  optimizer:
+    type: Adam
+    lr: 2.0e-4
+    betas: [0.9, 0.98]
+    weight_decay: 0.0
+  ema:
+    enabled: false              # FastDiff も未使用
+  validation:
+    interval_steps: 10000
+    metric: mse_noise           # ε prediction の MSE
+    num_utterances: 100
+data:
+  root: /path/to/LibriTTS-R     # 実環境では --src-dir / .env で上書き
+  subsets: [train-clean-100, train-clean-360]
+  sample_rate: 24000
+  audio_normalization:          # Vocos sox `norm` と数値等価な peak 正規化
+    method: peak_norm           # torchaudio 2.11 で sox 廃止のため自前実装 (T-M0.1 §9.1)
+    train_gain_db: [-6.0, -1.0]
+    val_gain_db: -3.0

@@ -1,0 +1,12 @@
+{
+  "_comment": "TODO: M5/M6 で完成。uv + CUDA base image を使う devcontainer。現状は placeholder。",
+  "name": "wavenext2",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13",
+  "features": {},
+  "postCreateCommand": "uv sync",
+  "customizations": {
+    "vscode": {
+      "extensions": ["charliermarsh.ruff", "ms-python.python"]
+    }
+  }
+}

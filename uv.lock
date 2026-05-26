@@ -1329,7 +1329,7 @@ wheels = [
 [[package]]
 name = "wavenext2"
 version = "0.0.1"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "einops" },
     { name = "librosa" },

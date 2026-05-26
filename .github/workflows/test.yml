@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Verify lockfile is up to date
+        run: uv lock --check
+
+      - name: Sync (frozen)
+        run: uv sync --frozen
+
+      - name: Pytest (placeholder/unit; CPU only)
+        run: uv run pytest -q
+        # NOTE: GPU 必須テストは runner に GPU が無いため skip マークで除外する。
+        #       重い CUDA smoke は nightly / self-hosted runner で別途 (T-M2.6 申し送り)。

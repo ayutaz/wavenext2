@@ -1,0 +1,94 @@
+# =============================================================================
+# GAN-WaveNeXt 2 設定 (ドラフト)
+# docs/implementation-plan.md §5 の雛形を反映。M2.5 (訓練スクリプト) で完成形へ。
+# secrets (API key 等) は書かない — .env / 環境変数経由で読み込む。
+# =============================================================================
+model:
+  type: gan_wavenext2
+  T: 4                          # sub-model 数 (= iterations)。論文推奨 T=4
+  share_sub_models: false       # Table 1 から独立パラメータと判明
+  initial_input: zeros          # 論文「initial input noise isn't required」→ ゼロベクトル
+  sub_model:
+    n_mels: 128
+    sample_rate: 24000
+    hop: 300                    # GAN は HiFi-GAN/WaveFit に揃え 300
+    n_fft: 2048
+    win_length: 1200
+    f_min: 20
+    f_max: 12000
+    mel:
+      power: 1.0
+      mel_scale: slaney
+      norm: slaney
+      log_eps: 1.0e-5           # 自然対数 + clamp(min=eps)
+    stft_module:                # sub-model 入力側 STFT (architecture.md §3.1)
+      n_fft: 2048               # mel と同一
+      win_length: 1200
+      hop: 300
+      window: hann
+      center: true
+      normalized: false
+    convnext:
+      n_blocks: 8
+      embed_dim: 512
+      intermediate_dim: 1536
+      kernel_size: 7
+      layer_scale_init: 1.0e-6
+    head:                       # 元 WaveNeXt poster + wetdog 実装で確定
+      linear1_out: 2050         # = n_fft + 2
+      linear1_bias: true
+      linear2_out: 300          # = hop_length
+      linear2_bias: false
+      output_clip: [-1.0, 1.0]
+    init: trunc_normal_0.02     # 全 Conv1d/Linear の重み初期化
+discriminator:
+  type: msd_only                # WaveFit-PT 実装に従う (MPD は使わない)
+  num_D: 3
+  ndf: 16
+  layers: 4
+  downsampling_factor: 4
+loss:
+  adversarial: hinge            # WaveFit-PT 実装
+  fm_loss: l1
+  mrstft:
+    fft_sizes: [512, 1024, 2048]
+    win_lengths: [360, 900, 1800]
+    hop_sizes: [80, 150, 300]
+    eps: 1.0e-5
+  weights:
+    d_gan: 1.0
+    d_fm: 10.0
+    mrstft_sc: 2.5
+    mrstft_mag: 2.5
+    mel_mae: 0.0
+train:
+  batch_size: 16
+  segment_length: 16384         # Vocos 流
+  num_workers: 8
+  max_steps: 2_000_000
+  grad_clip_norm: 1.0
+  optimizer:
+    type: AdamW
+    lr_g: 1.0e-4
+    lr_d: 2.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 1.0e-3
+  scheduler:
+    type: InverseLR
+    inv_gamma: 200000
+    power: 0.5
+    warmup: 0.999
+  ema:
+    enabled: false              # Vocos / WaveFit-PT 共に未使用
+  validation:
+    interval_steps: 10000
+    metric: mrstft_total        # sc + mag の和を最小化
+    num_utterances: 100
+data:
+  root: /path/to/LibriTTS-R     # 実環境では --src-dir / .env で上書き
+  subsets: [train-clean-100, train-clean-360]
+  sample_rate: 24000
+  audio_normalization:          # Vocos sox `norm` と数値等価な peak 正規化
+    method: peak_norm           # torchaudio 2.11 で sox 廃止のため自前実装 (T-M0.1 §9.1)
+    train_gain_db: [-6.0, -1.0] # peak を U(-6,-1) dBFS へ
+    val_gain_db: -3.0           # peak を -3 dBFS へ

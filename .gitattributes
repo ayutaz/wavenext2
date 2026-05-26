@@ -1,0 +1,32 @@
+# 既定: テキストは LF に正規化 (Windows 開発 / Linux A100 混在での CRLF 混入防止)
+* text=auto eol=lf
+
+# テキストファイル (明示)
+*.py    text eol=lf
+*.toml  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.tsv   text eol=lf
+*.cfg   text eol=lf
+*.txt   text eol=lf
+uv.lock text eol=lf
+
+# Windows 専用スクリプトは CRLF
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+
+# バイナリ (差分・正規化しない)
+*.wav   binary
+*.flac  binary
+*.mp3   binary
+*.pt    binary
+*.pth   binary
+*.ckpt  binary
+*.safetensors binary
+*.npy   binary
+*.npz   binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary
