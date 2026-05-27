@@ -3,11 +3,12 @@ id: T-M2.4
 title: GAN-WaveNeXt 2 モデル (T sub-model 直列 + fixed-point iteration)
 milestone: M2
 phase: M2
-status: pending
+status: completed
 size: M
 owner: -
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
+status_note: completed 2026-05-28 (tests/test_gan_wavenext2.py 23 pass)
 depends_on: [T-M1.6]
 blocks: [T-M2.5, T-M4.3]
 related_docs:
@@ -615,10 +616,12 @@ class GANWaveNext2(nn.Module):
   - **`audio_length: int` を `audio_shape: tuple[int, ...]` (= `(B, T_audio)`) に変更**: 多 channel 対応が将来出たときの拡張性向上。**M1 phase review 風の検討**: 現状 mono のみ前提なので `int` で十分、stereo / multichannel は M7 で再考
   - **`from_config(cls, cfg: dict)` factory 追加**: T-M1.6 §8.2 (factory パターン全モジュール一貫化) と整合させるため、本チケットでも factory を追加することを **推奨**
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 完了後追記)
+- **戻り値仕様はパターン (A) で確定**: `training.md` §2.1/§2.2 が `n_t = sub(mel,y_t); y_t = y_t - n_t`、初期 zeros、**追加 clamp なし** ("clip は sub-model 内部で適用済み") と明示。`SubModelGAN` は既に n_t を返し generator 内で clip[-1,1] 済 (T-M1.6) なので、本クラスは `_residual_update = y - n_t` のみ。T-M1.6 docstring と整合済 (再 update 不要)。
+- **T>1 の出力範囲**: 未訓練では残差累積で `y_0 ∈ [-T, T]` を取りうる (n_t が各 ±1 まで)。ticket §5.1 の「[-1,1] に収まる」は **T=1 のみ厳密**で、T>1 は finite を要求する設計に修正 (収束時に target∈[-1,1] へ)。`test_T1_output_in_range` + `test_forward_finite` に分離。
+- **`enable_grad_ckpt` は T-M2.4 レベルで実装**: 現 `SubModelGAN` / `WaveNextGenerator` は `enable_grad_ckpt` 引数を持たない (T-M1.4/T-M1.6 未実装)。ticket §8.1 採用案通り `torch.utils.checkpoint(sub, mel, y, use_reentrant=False)` を forward で挟む方式を採用し、sub-model 改修を回避。`test_enable_grad_ckpt_propagation` (sub-model 属性確認) は不適となり、flag 確認 + 出力等価性テストに置換。
+- 想定外: ticket の param 許容 (±0.05M) は embed kernel=1 確定 (+2.9%) 前の値。`test_sub_model.py` と同じ **±5% 相対許容** + 厳密 T 線形 (`n == T*15_427_674`) に変更。
+- 教訓: 完了済 component (T-M1.x) の API が ticket 記述の前提 (`enable_grad_ckpt` 引数、`from_config(mode=)`) と乖離している箇所は、consumer 側 (本チケット) で吸収し ticket §8.3 に明記する。
 
 ## 9. 後続タスクへの連絡事項
 

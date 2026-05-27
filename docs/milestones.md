@@ -342,10 +342,10 @@ class GANWaveNext2(nn.Module):
         return y
 ```
 
-**Acceptance**:
-- [ ] パラメータ数が Table 1 と一致 (T=4 で ~59.94M)
-- [ ] forward → backward が動作
-- [ ] T=1 で `y_0 = -sub_model(mel, zeros)`、つまり generator が直接波形を出力する形になっていることを確認
+**Acceptance** (`tests/test_gan_wavenext2.py`、2026-05-28 完了、23 件 pass):
+- [x] パラメータ数が Table 1 と一致 (T=4 で 61.71M = 4×15.43M、Table 1 59.94M +2.9%。T=1..5 で厳密 T 線形を検証)
+- [x] forward → backward が動作 (T=4 で全 4 sub-model の全 param に grad)
+- [x] T=1 で `y_0 = -sub_model(mel, zeros)` (パターン A: `y_{t-1}=y_t-n_t`、追加 clamp なし)。`return_intermediates` / `audio_length=None` auto-infer / `enable_grad_ckpt` (T-M2.4 レベル checkpoint) / `from_config` も実装
 
 ### M2.5 Training script (`src/wavenext2/train/train_gan.py`)
 **チケット**: [T-M2.5](tickets/T-M2.5-train-gan.md)

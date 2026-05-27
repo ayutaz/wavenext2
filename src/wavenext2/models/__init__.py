@@ -6,6 +6,7 @@ from wavenext2.models.discriminator import (
     NLayerDiscriminator,
     SubDiscOutput,
 )
+from wavenext2.models.gan_wavenext2 import GANWaveNext2
 from wavenext2.models.generator import WaveNextGenerator
 from wavenext2.models.noise_embedding import NoiseEmbedding, sinusoidal_embedding
 from wavenext2.models.stft import STFTModule
@@ -14,6 +15,7 @@ from wavenext2.models.sub_model import CONCAT_ORDER, SubModelDiff, SubModelGAN
 __all__ = [
     "CONCAT_ORDER",
     "ConvNeXtBlock",
+    "GANWaveNext2",
     "MultiScaleDiscriminator",
     "NLayerDiscriminator",
     "NoiseEmbedding",
