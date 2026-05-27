@@ -337,6 +337,7 @@ def main(argv: list[str] | None = None) -> None:
     D = MultiScaleDiscriminator.from_config(cfg["discriminator"]).to(device)
     opt_G, opt_D, sch_G, sch_D = _build_optim(cfg, G, D)
     crit = _Criteria(mrstft=MultiResolutionSTFTLoss(**cfg["loss"]["mrstft"]))
+    crit.mrstft.to(device)  # MR-STFT の window buffer を device へ (stft の device 不一致回避)
 
     state = TrainState()
     if args.resume:

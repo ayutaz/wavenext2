@@ -371,9 +371,10 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 
 **Deliverable**: 1 サンプルだけで 1000 step 訓練して loss が下がることを確認
 
-**Acceptance**:
-- [ ] 1 utterance で 1000 step 後、再構成音声が GT に近づく (MR-STFT loss が初期値の 10% 以下)
-- [ ] 生成波形が `[-1, 1]` に収まる
+**Acceptance** (`tests/test_train_gan_overfit.py` + `scripts/smoke_gan_synthetic.py`、2026-05-28):
+- [x] **synthetic gate (CPU/GPU, データ不要)**: 合成 1 sample overfit で MR-STFT が減少 (best/init=0.84 < 0.92)、finite、勾配が流れることを確認 → 訓練 stack の sanity 担保
+- [ ] 実 LibriTTS-R 1 utterance × 1000 step overfit (MR-STFT < 初期値 10%) は **T-M5.1 と併走で実データ取得後に実走** (`test_smoke_completes`、slow+gpu で skip 中)
+- ⚠️ **発見 (要 M2 phase review / M5 注視)**: 出力 head の `clip(-1,1)` は飽和域で勾配 0。高 lr (≥5e-4) では generator が ±1 を超え **凍結** (loss 不変)。低 lr (1e-4) なら飽和前に学習継続。実訓練 (lr 1e-4 + InverseLR warmup) は安全側だが、発散時は `final_activation="tanh"` fallback を検討 (architecture.md generator 注記)。
 
 ---
 

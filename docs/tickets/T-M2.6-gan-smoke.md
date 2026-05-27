@@ -3,11 +3,12 @@ id: T-M2.6
 title: GAN smoke (1 sample × 1000 step overfitting)
 milestone: M2
 phase: M2
-status: pending
+status: completed
 size: S
 owner: -
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
+status_note: synthetic gate 完了 2026-05-28。実データ 1000-step overfit は T-M5.1 併走
 depends_on: [T-M2.5]
 blocks: [T-M5.1]
 related_docs:
@@ -449,10 +450,16 @@ logging:
   - 期待値の上限を明示することで M5.1 fail 時の誤った遡及調査 (T-M1.6 / T-M2.4 への過剰な疑い) を防ぐ
   - M5.1 で fail した場合、まず以下を疑う: hyperparameter (lr, batch_size, warmup), データ前処理 (mel 正規化、audio gain), 訓練 schedule (epoch 数、scheduler)。smoke が pass しているので architectural バグの優先度は低い
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 完了後追記)
+- **user 判断で synthetic gate を主軸に採用**: LibriTTS-R が未取得 (T-M0.3 DL 待ち) のため、実データ 1000-step overfit (`test_smoke_completes`) は slow+gpu で skip し T-M5.1 と併走。代わりに `scripts/smoke_gan_synthetic.py` (2 正弦波 1 sample) で訓練 stack の勾配 sanity を担保。
+- **🔴 重大発見: clip(-1,1) head の飽和凍結**: synthetic overfit で判明。出力 head の `torch.clip(-1,1)` は飽和域で勾配が厳密に 0 のため、generator の raw 出力が ±1 を超えると**その sample の勾配が消失し学習が凍結**する。
+  - lr=2e-3/5e-4: step ~50 で max_abs=2.0 (T=2 で ±1×2 sub-model) に張り付き MR-STFT 不変 (G 単独 MR-STFT のみでも同様 → GAN 力学ではなく head 起因)。
+  - lr=1e-4: max_abs≈1.0 で飽和せず学習継続 (best/init=0.84)。
+  - → **実訓練 (lr 1e-4 + InverseLR warmup で初期 lr ~1e-7) は安全側**だが、M5.1/M6 で loss 停滞・max_abs 飽和が出たら `WaveNextGenerator(final_activation="tanh")` fallback を ablation (tanh は飽和域でも非ゼロ勾配)。architecture.md generator の `final_activation` 注記と整合。論文は clip(-1,1) 採用のため既定は clip 維持。
+- **smoke の判定指標**: full GAN の単一サンプル overfit は adversarial/FM が MR-STFT 降下と競合し**非単調**。final 値は振動するため、`init`=step0-4 平均 (定数 LR で warmup bypass) と `best`=全 step 最小値の比 (best/init) で「学習したか (飽和凍結 ≈1.0 と判別)」を判定。閾値 0.92 (実測 0.84)。
+- **pytest 設定**: `[tool.pytest.ini_options]` に `addopts="-m 'not slow and not gpu'"` + `pythonpath=["."]` を追加。slow/gpu はデフォルト除外、`scripts/` を namespace package として import 再利用 (DRY)。`scripts/smoke_gan.py` は pytest を subprocess 起動する薄い wrapper。
+- 想定外: 訓練ループのバグではなく **出力 head の活性化選択**が overfit 可否を左右した。smoke の本来の価値 (architectural sanity) がまさにこの head の落とし穴を早期に可視化した。
+- 教訓: clip 系の有界活性化は飽和勾配ゼロの罠がある。lr/init/正規化で raw 出力を [-1,1] 内に保つ設計が前提。M5.1 で実データ時に max_abs を監視メトリクスに含める (§9 申し送り)。
 
 ## 9. 後続タスクへの連絡事項
 

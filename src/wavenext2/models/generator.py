@@ -37,8 +37,10 @@ class WaveNextGenerator(nn.Module):
             (per-block fc_t は Table 1 と +14% 乖離のため撤去、open-questions §C7)。
         layer_scale_init: ConvNeXt LayerScale 初期値 (1e-6)。
         embed_kernel_size: 入力 embed Conv1d の kernel。既定 1 (Table 1 整合、上記参照)。
-        final_activation: "clip" (既定、GAN の波形/残差出力) / "tanh" (M3 compile fallback 予約) /
-            "none" (Diff の ε 予測など unbounded 出力。ε~N(0,1) は clip すると破壊的)。
+        final_activation: "clip" (既定、GAN の波形/残差出力) / "tanh" (clip 飽和凍結時の fallback;
+            T-M2.6 synthetic smoke で高 lr 時に clip の飽和域勾配 0 による学習凍結を確認。tanh は
+            飽和域でも非ゼロ勾配なので M5.1/M6 発散時の ablation 候補) / "none" (Diff の ε 予測など
+            unbounded 出力。ε~N(0,1) は clip すると破壊的)。
         block_factory: ConvNeXtBlock 差し替え用 DI (None で既定)。
     """
 
