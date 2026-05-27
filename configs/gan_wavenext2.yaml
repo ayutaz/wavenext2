@@ -80,14 +80,39 @@ train:
     warmup: 0.999
   ema:
     enabled: false              # Vocos / WaveFit-PT 共に未使用
-  validation:
-    interval_steps: 10000
-    metric: mrstft_total        # sc + mag の和を最小化
-    num_utterances: 100
+  amp:
+    enabled: false              # CLI の --amp フラグで bf16 に上書き
+    dtype: bfloat16
+# validation / checkpoint / logging は top-level (train_gan.py が cfg["..."] で参照)
+validation:
+  interval_steps: 10000
+  num_utterances: 100
+  metric: mrstft_total          # sc + mag の和を最小化
+checkpoint:
+  dir: checkpoints/gan
+  interval_steps: 10000
+  keep_last_n: 5                # rolling delete (best.pt は除外)
+logging:
+  tensorboard_dir: logs/gan
+  scalar_interval_steps: 100
 data:
   root: /path/to/LibriTTS-R     # 実環境では --src-dir / .env で上書き
+  root_dir: /path/to/LibriTTS-R # build_loaders 用 (T-M5.1/T-M6.1 で実パスに差し替え)
+  train_filelist: filelists/train.tsv  # T-M0.3 生成物
+  val_filelist: filelists/val.tsv      # speaker-balanced、shuffle=False
   subsets: [train-clean-100, train-clean-360]
   sample_rate: 24000
+  mel:                          # LogMelSpectrogram.from_config 用 (hop は model.sub_model.hop に同期)
+    sample_rate: 24000
+    n_fft: 2048
+    win_length: 1200
+    n_mels: 128
+    f_min: 20
+    f_max: 12000
+    power: 1.0
+    mel_scale: slaney
+    norm: slaney
+    log_eps: 1.0e-5
   audio_normalization:          # Vocos sox `norm` と数値等価な peak 正規化
     method: peak_norm           # torchaudio 2.11 で sox 廃止のため自前実装 (T-M0.1 §9.1)
     train_gain_db: [-6.0, -1.0] # peak を U(-6,-1) dBFS へ

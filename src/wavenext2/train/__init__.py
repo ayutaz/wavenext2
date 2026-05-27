@@ -1,6 +1,5 @@
-"""wavenext2.train public API.
+"""wavenext2.train public API."""
 
-TODO: 後続チケットで `__all__` に re-export を追加。
-"""
+from wavenext2.train.train_gan import TrainState, main, train_gan_step
 
-# __all__ = []  # 後続チケットで明示
+__all__ = ["TrainState", "main", "train_gan_step"]

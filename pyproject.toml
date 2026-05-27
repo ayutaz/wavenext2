@@ -25,6 +25,9 @@ dependencies = [
     # (pure-Python 実装 or mel-cepstral-distance)。log-F0 RMSE は pyworld で充足。
 ]
 
+[project.scripts]
+train-gan = "wavenext2.train.train_gan:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

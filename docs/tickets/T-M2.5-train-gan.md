@@ -3,11 +3,12 @@ id: T-M2.5
 title: GAN 訓練スクリプト (AdamW + InverseLR + 交互更新 + grad clip + 監視)
 milestone: M2
 phase: M2
-status: pending
+status: completed
 size: L
 owner: -
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
+status_note: completed 2026-05-28 (tests/test_train_gan.py + test_inverse_lr.py 21 pass)
 depends_on: [T-M2.1, T-M2.2, T-M2.3, T-M2.4]
 blocks: [T-M2.6, T-M5.1]
 related_docs:
@@ -935,10 +936,16 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
 - 1000 step smoke (T-M2.6) で loss curve が想定外 (NaN / divergence / D 極小化) なら、本チケットの hinge GAN / lr / scheduler を見直す
 - 1 epoch (T-M5.1) で validation MR-STFT が初期値の 30% を切らなければ、loss weight / amp / grad clip を見直す
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 完了後追記)
+- **CLI は click ではなく argparse**: `click` は依存に無く、依存追加を避けるため stdlib argparse を採用。`main(argv=None)` で `parser.parse_args(argv)`、`[project.scripts] train-gan` も登録。
+- **実 API と ticket 擬似コードの差異を吸収**:
+  - `MultiResolutionSTFTLoss(y_hat, audio)` は **`(sc, mag)` の 2 tensor を返す** (ticket の `(total, unweighted_dict)` ではない)。重み付けは train_gan_step 側で実施。
+  - Discriminator は `list[SubDiscOutput(logits, features)]` を返すため、hinge は `[o.logits for o in outs]`、FM は `[[f for f in o.features] for o in outs]` を抽出して渡す。`HingeGANLoss.d_loss/g_loss` と `FeatureMatchingLoss` は logit/feature の list を受ける。
+  - `SubModelGAN.from_config` / `MultiScaleDiscriminator.from_config` は `mode=` 引数を持たない (ticket の `from_config(cfg, mode="gan")` は誤り) → `from_config(cfg)` で呼ぶ。
+- **生成波形 crop (T-M2.4 申し送りの実装地点)**: `G(mel)` は `T_mel*hop` を出し常に `segment_length` より長い (center=True の +1 frame)。train_gan_step / run_validation で `y_hat = G(mel)[..., :audio.shape[-1]]` と GT 長に crop。pad は不要 (gen 長 > seg が常に成立)。
+- **config schema**: `validation`/`checkpoint`/`logging` を **top-level** に置く設計に統一 (ticket §2.5 準拠)。既存 yaml は `train.validation` 入れ子だったため移動。`model.sub_model` の nested 値は `GANWaveNext2.from_config` 経由では既定値にフォールバックするが、GAN 既定 (n_fft=2048/hop=300/win=1200/mel=128) が config 値と一致するため正しく動作 (nested→flat の厳密マッピングは real-data 経路を実走する T-M5.1 で詰める)。
+- 想定外: `train_gan_step` を public 関数として切り出した設計 (§8.1 採用昇格) が、synthetic tensor だけで CPU 上で全 loss 経路を unit テストできる利点を実証 (real-data 不要)。`build_loaders`/`main` の real-data 経路は T-M5.1 まで未実走。
+- 教訓: 完了済 component の戻り値・signature を実装着手時に Read で確認してから配線する。ticket 擬似コードは作成時点の想定で、実装後の API と乖離する (今回 MR-STFT 戻り値・Discriminator 出力・from_config signature の 3 点)。
 
 ## 9. 後続タスクへの連絡事項
 

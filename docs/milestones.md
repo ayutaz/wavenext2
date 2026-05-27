@@ -360,10 +360,11 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 # Grad clip: max_norm = 1.0
 ```
 
-**Acceptance**:
-- [ ] 1 step 実行で `loss_G`, `loss_D` が finite
-- [ ] checkpoint 保存・復元が動作
-- [ ] TensorBoard に loss / 各 sub-loss / sample audio が記録される
+**Acceptance** (`tests/test_train_gan.py` + `tests/test_inverse_lr.py`、2026-05-28 完了、21 件 pass):
+- [x] 1 step 実行で `loss_G`, `loss_D` が finite (`train_gan_step` 公開関数、synthetic batch で検証)
+- [x] checkpoint 保存・復元が動作 (step/opt/sch/RNG 完全復元 + atomic best.pt rename)
+- [x] TensorBoard に loss / 各 sub-loss / lr が記録される (`log_scalars`、sample audio は real-data の T-M5.1 で確認)
+- 補足: InverseLR を step=0/inv_gamma/10×inv_gamma で数式 pin。CLI は click 非依存のため argparse 採用 (§8.3)。`build_loaders`/`run_validation`/`main` の real-data 経路は T-M5.1 (1 epoch) で実走確認。
 
 ### M2.6 Smoke training (overfitting test)
 **チケット**: [T-M2.6](tickets/T-M2.6-gan-smoke.md)
