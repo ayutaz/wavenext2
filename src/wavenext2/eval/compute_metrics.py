@@ -144,7 +144,8 @@ def evaluate_dataset(
             has_valid = len(vals) > 0 and bool(np.any(~np.isnan(vals)))
             summary[f"{metric}_mean"] = float(np.nanmean(vals)) if has_valid else float("nan")
             summary[f"{metric}_std"] = float(np.nanstd(vals)) if has_valid else float("nan")
-    # F0 失敗 utterance 数 (どれか 1 指標が nan の件数)。
+    # skip 数 = どれか 1 指標が nan の utterance 件数 (F0 失敗 or MFCC 空)。各指標は独立に
+    # nanmean 集約済なので集計自体は汚染されない。per-metric 内訳が要れば per_utt を参照。
     n_skipped = sum(
         1 for r in per_utt if any(isinstance(r.get(m), float) and np.isnan(r[m]) for m in metrics)
     )

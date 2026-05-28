@@ -68,19 +68,22 @@ def measure_rtf(
         rtfs: list[float] = []
         for i in range(n_measure):
             mel = mels[i % len(mels)].to(device)
-            audio_sec = (mel.shape[-1] * hop) / sample_rate
             if device == "cuda":
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
                 start.record()
-                _ = synth(mel)
+                out = synth(mel)
                 end.record()
                 torch.cuda.synchronize()
                 elapsed = start.elapsed_time(end) / 1000.0  # ms → s
             else:
                 t0 = time.perf_counter()
-                _ = synth(mel)
+                out = synth(mel)
                 elapsed = time.perf_counter() - t0
+            # RTF 定義に忠実に **実出力長** を使う (mel*hop 推定だと padding 由来 ±1 frame の bias)。
+            # 出力長が取れない場合のみ mel*hop に fallback。
+            out_len = out.shape[-1] if hasattr(out, "shape") else mel.shape[-1] * hop
+            audio_sec = out_len / sample_rate
             rtfs.append(elapsed / audio_sec)
     finally:
         torch.set_num_threads(original_threads)  # グローバル状態を必ず復元
