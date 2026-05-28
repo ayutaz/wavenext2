@@ -102,6 +102,22 @@ def test_compute_coefficients_pure() -> None:
     assert torch.equal(abar, snapshot)  # in-place 変更なし
 
 
+def test_compute_coefficients_rejects_non_increasing() -> None:
+    # denoising 順 (狭義単調増加) でない schedule は ValueError (M3 review 軽微-1)。
+    with pytest.raises(ValueError, match="strictly increasing"):
+        _compute_ddpm_coefficients(torch.tensor([0.5, 0.1, 0.9, 0.95]))
+
+
+def test_reverse_sample_bf16_coefficients_fp32(mock_model: _MockModel) -> None:
+    # bf16 mel でも係数は fp32 で計算され ᾱ_1=1-1e-4 が 1.0 に丸まらない (M3 review 重要-1)。
+    # mock sub-model (scale=0) で finite + 正しい shape を確認 (fp32 強制の回帰)。
+    mel = torch.randn(1, 128, 16, dtype=torch.bfloat16)
+    out = reverse_sample(mock_model, mel, seed=0)
+    assert out.dtype == torch.bfloat16
+    assert torch.isfinite(out.float()).all()
+    assert out.shape == (1, 16 * 256)
+
+
 # --------------------------------------------------------------------------- #
 # σ² の非負性・整合性 (CRITICAL safety nets)
 # --------------------------------------------------------------------------- #

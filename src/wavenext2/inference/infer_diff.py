@@ -79,6 +79,10 @@ def _compute_ddpm_coefficients(abar: torch.Tensor) -> dict[str, torch.Tensor]:
         - device/dtype は abar から継承、in-place 演算なし (pure)。
     """
     k = abar.shape[0]
+    # denoising 順で ᾱ が狭義単調増加でないと σ²≥0 が崩れる (docs/training.md §4.2)。
+    # 将来 schedule 差し替え時に silent な clamp 吸収でバグが隠れるのを防ぐ明示 assert。
+    if k > 1 and not bool(torch.all(abar[:-1] < abar[1:])):
+        raise ValueError(f"abar must be strictly increasing (denoising order), got {abar.tolist()}")
     sqrt_abar = torch.sqrt(abar)
     sqrt_one_minus_abar = torch.sqrt(1.0 - abar)
 
@@ -134,8 +138,10 @@ def reverse_sample(
     b, _, t_mel = mel.shape
     t_audio = t_mel * model.hop_length
 
-    # x_0 予測経由式に必要な係数を取得 (β は計算しない、device 同期)。
-    abar = model.NOISE_SCHEDULE_ABAR.to(device=device, dtype=dtype)
+    # 係数は **常に fp32** で計算する (ML review 重要-1): bf16 では ᾱ_1=1-1e-4 が 1.0 に丸まり
+    # √(1-ᾱ)=0 → conditioning c_t=0 / x0_hat=x/√ᾱ の情報破壊が silent に起きる。x は mel.dtype の
+    # まま回し、fp32 スカラ係数は使用箇所で `.to(dtype)` する (x の dtype を保つ)。
+    abar = model.NOISE_SCHEDULE_ABAR.to(device=device, dtype=torch.float32)
     coef = _compute_ddpm_coefficients(abar)
     k_steps = abar.shape[0]  # = 4
 
@@ -155,26 +161,28 @@ def reverse_sample(
 
         for t in range(1, k_steps + 1):  # t = 1..K (1-indexed denoising 順)
             idx = t - 1  # 0-indexed tensor access
-            abar_t = coef["abar"][idx]
+            abar_t = coef["abar"][idx]  # fp32 スカラ
             abar_next = coef["abar_next"][idx]  # t<K: ᾱ_{t+1}、t=K: 1.0
             sqrt_abar_t = coef["sqrt_abar"][idx]
             sqrt_one_minus_abar_t = coef["sqrt_one_minus_abar"][idx]
-            c_t = sqrt_one_minus_abar_t.expand(b)
+            c_t = sqrt_one_minus_abar_t.expand(b).to(dtype)  # conditioning は x の dtype へ
 
             # === point-specialized 1-to-1 dispatch (k=t、band 判定不要、architecture.md §5) ===
             eps_pred = model.sub_models[idx](mel, x, c_t)
 
-            # 1. x_0 を推定 (β 不使用)
-            x0_hat = ((x - sqrt_one_minus_abar_t * eps_pred) / sqrt_abar_t).clamp(-1.0, 1.0)
+            # 1. x_0 を推定 (β 不使用)。fp32 スカラ係数を x.dtype に cast して x の dtype を保つ。
+            x0_hat = (
+                (x - sqrt_one_minus_abar_t.to(dtype) * eps_pred) / sqrt_abar_t.to(dtype)
+            ).clamp(-1.0, 1.0)
 
             if t < k_steps:
                 # 2. 次のクリーン側 ᾱ_next へ射影 (DDIM/DDPM 一般形、β-free)
-                #    σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next) ≥ 0 (denoising 方向)
+                #    σ² = η²·(1-ᾱ_next)/(1-ᾱ_t)·(1-ᾱ_t/ᾱ_next) ≥ 0 (denoising 方向、fp32 計算)
                 sigma2 = eta**2 * (1.0 - abar_next) / (1.0 - abar_t) * (1.0 - abar_t / abar_next)
                 coef_eps = torch.sqrt(torch.clamp(1.0 - abar_next - sigma2, min=0.0))
-                x = torch.sqrt(abar_next) * x0_hat + coef_eps * eps_pred
+                x = torch.sqrt(abar_next).to(dtype) * x0_hat + coef_eps.to(dtype) * eps_pred
                 if eta > 0:
-                    x = x + torch.sqrt(sigma2) * _randn(tuple(x.shape))
+                    x = x + torch.sqrt(sigma2).to(dtype) * _randn(tuple(x.shape))
             else:
                 # 3. 最終 step (t=K): ᾱ_next = 1 で x_0 推定値がそのまま出力
                 x = x0_hat

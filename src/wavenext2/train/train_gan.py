@@ -310,7 +310,10 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
-    set_seed(cfg.get("seed", 42))
+    seed = cfg.get("seed")
+    if seed is None:
+        seed = cfg.get("train", {}).get("seed", 42)
+    set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if args.amp else torch.float32
 
@@ -365,7 +368,7 @@ def main(argv: list[str] | None = None) -> None:
             )
 
         val_iv = cfg["validation"]["interval_steps"]
-        if state.step > 0 and state.step % val_iv == 0:
+        if val_iv and state.step > 0 and state.step % val_iv == 0:
             val = run_validation(G, val_loader, crit, device)
             writer.add_scalar("val/mrstft_total", val, state.step)
             if val < state.best_val_mrstft:
@@ -375,7 +378,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
 
         ckpt_iv = cfg["checkpoint"]["interval_steps"]
-        if state.step > 0 and state.step % ckpt_iv == 0:
+        if ckpt_iv and state.step > 0 and state.step % ckpt_iv == 0:
             save_checkpoint(
                 ckpt_dir / f"step_{state.step}.pt", G, D, opt_G, opt_D, sch_G, sch_D, state, cfg
             )

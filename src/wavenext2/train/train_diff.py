@@ -320,7 +320,11 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
-    set_seed(cfg.get("seed", 42))
+    # top-level seed が無ければ train.seed を使う (None チェックで 0 を握り潰さない、ML review C1)。
+    seed = cfg.get("seed")
+    if seed is None:
+        seed = cfg.get("train", {}).get("seed", 42)
+    set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if args.amp else torch.float32
     k = args.sub_model_k
@@ -366,8 +370,9 @@ def main(argv: list[str] | None = None) -> None:
         if hist_iv and state.step % hist_iv == 0:
             writer.add_histogram(f"sub_{k}/noise_level_c", logs["_c_batch"], state.step)
 
+        # interval_steps=0 は「無効」(smoke 等)。`step % 0` の ZeroDivisionError を回避 (ML review I1)。
         val_iv = cfg["validation"]["interval_steps"]
-        if state.step > 0 and state.step % val_iv == 0:
+        if val_iv and state.step > 0 and state.step % val_iv == 0:
             val = run_validation_diff(model, val_loader, k, cfg, device)
             for tag, v in val.items():
                 writer.add_scalar(f"sub_{k}/val/{tag}", v, state.step)
@@ -376,7 +381,7 @@ def main(argv: list[str] | None = None) -> None:
                 save_checkpoint(ckpt_dir / f"sub_{k}.pt", model, opt, state, cfg, atomic=True)
 
         ckpt_iv = cfg["checkpoint"]["interval_steps"]
-        if state.step > 0 and state.step % ckpt_iv == 0:
+        if ckpt_iv and state.step > 0 and state.step % ckpt_iv == 0:
             save_checkpoint(ckpt_dir / f"step_{state.step}_sub_{k}.pt", model, opt, state, cfg)
 
         state.step += 1
