@@ -18,7 +18,7 @@ related_docs:
 # T-M6.2: Diff-WaveNeXt 2 4 sub-model フル訓練 (A100 約 32h)
 
 > **マイルストーン**: [M6](../milestones.md#m6-本格訓練-claude-code-は起動監視のみ-wall-clock-a100-で約-442-時間) / **サブタスク**: [M6.2](../milestones.md#m62-diff-wavenext-2-4-sub-model-訓練)
-> **依存**: [T-M5.2](T-M5.2-diff-1epoch.md) (前提: [T-M3.2](T-M3.2-train-diff.md), [T-M3.3](T-M3.3-reverse-sampler.md), [T-M3.4](T-M3.4-post-filter.md), [T-M4.1](T-M4.1-objective-metrics.md)) / **後続**: [T-M6.3](T-M6.3-ablation.md), [T-M7.1](T-M7.1-mos-test.md)
+> **依存**: [T-M5.2](T-M5.2-diff-1epoch.md) (前提: T-M3.2, T-M3.3, T-M3.4, T-M4.1) / **後続**: [T-M6.3](T-M6.3-ablation.md), [T-M7.1](T-M7.1-mos-test.md)
 
 ## 1. タスク目的とゴール
 

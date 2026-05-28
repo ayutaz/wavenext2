@@ -38,7 +38,7 @@ M0 (環境整備) ─► M1 (コア部品) ┬─► M2 (GAN)  ─┐
 ## M0: 環境整備とデータ準備 (作業量: small)
 
 ### M0.1 Python 環境
-**チケット**: [T-M0.1](tickets/T-M0.1-python-env.md)
+**チケット**: T-M0.1
 
 **Deliverable**: `pyproject.toml` (uv 管理) + `uv.lock`
 
@@ -73,7 +73,7 @@ einops             # tensor reshape 用 (任意)
 **ユーザー操作**: 不要 (Claude Code が `uv venv --python 3.13.13` → `uv sync` まで実施)。CUDA は driver 596.21 で cu128 wheel が動作 (CUDA toolkit の別途インストールは不要、wheel 同梱ランタイムで充足)。
 
 ### M0.2 ディレクトリ scaffold
-**チケット**: [T-M0.2](tickets/T-M0.2-scaffold.md)
+**チケット**: T-M0.2
 
 **Deliverable**: `src/`, `configs/`, `tests/`, `scripts/`, `checkpoints/`, `logs/` の作成
 
@@ -129,7 +129,7 @@ scripts/{prepare_libritts.py, extract_mel.py, fit_post_filter.py}
 ## M1: コア部品 (sub-model の構成要素) (作業量: large、6 サブタスク)
 
 ### M1.1 ConvNeXt block (`src/wavenext2/models/convnext.py`)
-**チケット**: [T-M1.1](tickets/T-M1.1-convnext-block.md)
+**チケット**: T-M1.1
 
 **Deliverable**: GAN/Diff 両対応の `ConvNeXtBlock` クラス
 
@@ -153,7 +153,7 @@ class ConvNeXtBlock(nn.Module):
 - [x] gradient flow 確認: 全パラメータ + cond に grad
 
 ### M1.2 STFT module (`src/wavenext2/models/stft.py`)
-**チケット**: [T-M1.2](tickets/T-M1.2-stft-module.md)
+**チケット**: T-M1.2
 
 **Deliverable**: 波形 → STFT-spec (2F-2 ch) の変換モジュール
 
@@ -174,7 +174,7 @@ class STFTModule(nn.Module):
 - [x] 単純な正弦波で round-trip テスト: 複素 magnitude が 440Hz bin (38±1) に集中
 
 ### M1.3 Mel-spectrogram 抽出 (`src/wavenext2/data/mel.py`)
-**チケット**: [T-M1.3](tickets/T-M1.3-mel-spectrogram.md)
+**チケット**: T-M1.3
 
 **Deliverable**: `MelSpectrogram` クラス
 
@@ -194,7 +194,7 @@ class LogMelSpectrogram(nn.Module):
 - [x] 出力範囲が `[log(1e-5), log(max)]` ≈ `[-11.51, ?]` に収まる (eps=1e-5 確定、SoT)
 
 ### M1.4 Generator (`src/wavenext2/models/generator.py`)
-**チケット**: [T-M1.4](tickets/T-M1.4-generator.md)
+**チケット**: T-M1.4
 
 **Deliverable**: WaveNeXt-based generator
 
@@ -224,7 +224,7 @@ class WaveNextGenerator(nn.Module):
 - [ ] 重み初期化: `Conv1d.weight.std() ≈ 0.02`, `Linear.bias` がゼロ
 
 ### M1.5 Noise embedding (`src/wavenext2/models/noise_embedding.py`) [Diff のみ]
-**チケット**: [T-M1.5](tickets/T-M1.5-noise-embedding.md)
+**チケット**: T-M1.5
 
 **Deliverable**: sinusoidal + FC×2 SiLU の noise level embedding
 
@@ -247,7 +247,7 @@ class NoiseEmbedding(nn.Module):
 - [x] freq の log-spaced 確認: `freq[0] / freq[-1] ≈ 10000`。`input_rescale=1.0` 既定 (M3.5 で 1000 ablation 可)
 
 ### M1.6 Sub-model wrapper (`src/wavenext2/models/sub_model.py`)
-**チケット**: [T-M1.6](tickets/T-M1.6-sub-model.md)
+**チケット**: T-M1.6
 
 **Deliverable**: `SubModelGAN` と `SubModelDiff`
 
@@ -281,7 +281,7 @@ class SubModelDiff(nn.Module):
 ## M2: GAN-WaveNeXt 2 (作業量: large、6 サブタスク)
 
 ### M2.1 Dataset (`src/wavenext2/data/dataset.py`)
-**チケット**: [T-M2.1](tickets/T-M2.1-dataset.md)
+**チケット**: T-M2.1
 
 **Deliverable**: LibriTTS-R loader + **peak 正規化** (sox `norm` と数値等価、soundfile I/O)
 
@@ -302,7 +302,7 @@ class LibriTTSRDataset(Dataset):
 - [x] Batch TypedDict / seed_worker / n_samples attribute / from_config
 
 ### M2.2 Discriminator (`src/wavenext2/models/discriminator.py`)
-**チケット**: [T-M2.2](tickets/T-M2.2-discriminator.md)
+**チケット**: T-M2.2
 
 **Deliverable**: MSD × 3 (WaveFit-PT 完全準拠、MPD なし)
 
@@ -312,7 +312,7 @@ class LibriTTSRDataset(Dataset):
 - [x] AvgPool1d(k4,s2,p1) で隣接 sub-discriminator 間 downsample、weight_norm 全 Conv1d、Tanh/Sigmoid 不在 (hinge 互換)
 
 ### M2.3 Loss 関数 (`src/wavenext2/losses/`)
-**チケット**: [T-M2.3](tickets/T-M2.3-losses.md)
+**チケット**: T-M2.3
 
 **Deliverable**:
 - `adversarial.py`: hinge GAN loss (`HingeGANLoss`)
@@ -326,7 +326,7 @@ class LibriTTSRDataset(Dataset):
 - [x] 重み: D-GAN=1.0, D-FM=10.0, MRSTFT-SC=2.5, MRSTFT-Mag=2.5 (`compute_total_loss`、sorted 加算順、unweighted dict 返し)
 
 ### M2.4 GAN モデル (`src/wavenext2/models/gan_wavenext2.py`)
-**チケット**: [T-M2.4](tickets/T-M2.4-gan-model.md)
+**チケット**: T-M2.4
 
 **Deliverable**: T 個の sub-model を直列に並べた fixed-point iteration generator
 
@@ -348,7 +348,7 @@ class GANWaveNext2(nn.Module):
 - [x] T=1 で `y_0 = -sub_model(mel, zeros)` (パターン A: `y_{t-1}=y_t-n_t`、追加 clamp なし)。`return_intermediates` / `audio_length=None` auto-infer / `enable_grad_ckpt` (T-M2.4 レベル checkpoint) / `from_config` も実装
 
 ### M2.5 Training script (`src/wavenext2/train/train_gan.py`)
-**チケット**: [T-M2.5](tickets/T-M2.5-train-gan.md)
+**チケット**: T-M2.5
 
 **Deliverable**: AdamW + InverseLR + hinge GAN の交互更新ループ
 
@@ -367,7 +367,7 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 - 補足: InverseLR を step=0/inv_gamma/10×inv_gamma で数式 pin。CLI は click 非依存のため argparse 採用 (§8.3)。`build_loaders`/`run_validation`/`main` の real-data 経路は T-M5.1 (1 epoch) で実走確認。
 
 ### M2.6 Smoke training (overfitting test)
-**チケット**: [T-M2.6](tickets/T-M2.6-gan-smoke.md)
+**チケット**: T-M2.6
 
 **Deliverable**: 1 サンプルだけで 1000 step 訓練して loss が下がることを確認
 
@@ -381,7 +381,7 @@ opt_D = AdamW(D.parameters(), lr=2e-4, betas=[0.8, 0.99], weight_decay=1e-3)
 ## M3: Diff-WaveNeXt 2 (作業量: large、5 サブタスク)
 
 ### M3.1 Diff モデル (`src/wavenext2/models/diff_wavenext2.py`)
-**チケット**: [T-M3.1](tickets/T-M3.1-diff-model.md)
+**チケット**: T-M3.1
 
 **Deliverable**: 4 sub-model を独立に扱える wrapper + point-specialized partition
 
@@ -409,7 +409,7 @@ class DiffWaveNext2(nn.Module):
 > **実装メモ (2026-05-28)**: `from_config` は `mode=` 引数を取らない実 API に合わせた (チケット擬似コードの `SubModelDiff.from_config(cfg, mode="diff")` は誤り、M2 review 申し送り済)。`NOISE_SCHEDULE_ABAR` は buffer `noise_schedule_abar` への device-aware property alias として公開 (T-M3.3 が `model.NOISE_SCHEDULE_ABAR.to(device)` で参照)。`from_config(only_sub_model=k)` で 1 sub-model のみ lazy instantiate (他は None placeholder)。45 tests pass。
 
 ### M3.2 Training script (`src/wavenext2/train/train_diff.py`)
-**チケット**: [T-M3.2](tickets/T-M3.2-train-diff.md)
+**チケット**: T-M3.2
 
 **Deliverable**: 各 sub-model を独立に MSE loss で訓練
 
@@ -427,7 +427,7 @@ class DiffWaveNext2(nn.Module):
 > **実装メモ (2026-05-28)**: `train_diff_step(model, opt, batch, k, cfg, amp, dtype) -> dict` 公開関数 + `main()` (argparse、click 非依存で train_gan と統一)。**c/abar は fp32 強制** (bf16 で c≈0.99995→1.0 丸めで √ᾱ=0 になる罠を回避、§6.1)。`build_sub_model_cfg` で nested yaml → flat SubModelDiff kwargs を明示マップ (M2 review の偶然 default 一致を解消)。Validation は c∈{L,mid,U} の 3 点評価。**共通プリミティブ `utils/training_loop.py` (iter_forever/atomic_save/capture_rng_state/restore_rng_state/register_sigterm_handler) を抽出** し train_gan.py を refactor (GAN 22 tests 維持)。checkpoint save/load は payload 差 (GAN: G/D/opt×2/sch×2 vs Diff: model/opt/sub_model_k) のため各 trainer 別。`only_sub_model=k` lazy instantiation で 1 sub-model のみ訓練。diff config に top-level validation/checkpoint/logging + data.mel/filelist 追加、stale な per_block_projection 削除。14 tests pass、全体 341 passed。
 
 ### M3.3 Reverse sampler (`src/wavenext2/inference/infer_diff.py`)
-**チケット**: [T-M3.3](tickets/T-M3.3-reverse-sampler.md)
+**チケット**: T-M3.3
 
 **Deliverable**: x_0 予測経由 DDIM/DDPM 一般形 (β-free) 4-step sampling + 1-to-1 dispatch
 
@@ -456,7 +456,7 @@ def reverse_sample(model, mel, *, seed=None, eta=1.0):
 > **実装メモ (2026-05-28)**: `_compute_ddpm_coefficients` (β-free pure helper) + `reverse_sample(model, mel, *, seed=None, eta=1.0)` + `eval_mode(model)` context manager を実装。`seed` は `int | torch.Generator | None` の 3 形式 (global RNG 非汚染)。`eta=1.0` DDPM / `eta=0.0` DDIM を 1 引数切替。`infer_diff.py` 末尾の import 副作用で `DiffWaveNext2.synthesize = reverse_sample` を注入 (T-M4.3 が GAN/Diff 横断で `model.synthesize(mel)` 計測可能)。37 tests pass (mock で call_count==1 / dispatch order / σ²≥0 / β-free 検証)。全体 312 passed。
 
 ### M3.4 Post-filter (`src/wavenext2/inference/post_filter.py` + `scripts/fit_post_filter.py`)
-**チケット**: [T-M3.4](tickets/T-M3.4-post-filter.md)
+**チケット**: T-M3.4
 
 **Deliverable**: time-invariant spectral enhancement FIR の fit と apply
 
@@ -481,7 +481,7 @@ def apply_post_filter(audio, fir):  # torch / numpy 両受け
 > **実装メモ (2026-05-28)**: `apply_post_filter` は **torch.Tensor / np.ndarray 両受け** (full conv → `[N//2:N//2+T]` 切り出しで統一)。チケット §2 擬似コードの crop start=(N-1)//2 は偶数長 FIR で 1-sample 非対称になるため **N//2=256 に訂正** (delta@256 が厳密 identity、§8.3)。`reverse_sample(post_filter=fir|None)` で apply/no-apply switch を統合。`fir.npy` は `.gitignore` で `!post_filter/fir.npy` 除外解除 (M6.2 後 commit)。15 tests pass、全体 327 passed。
 
 ### M3.5 Smoke training
-**チケット**: [T-M3.5](tickets/T-M3.5-diff-smoke.md)
+**チケット**: T-M3.5
 
 **Deliverable**: sub-model 4 (primary、最難) で 1000 step overfit + 過学習テスト
 
@@ -496,7 +496,7 @@ def apply_post_filter(audio, fir):  # torch / numpy 両受け
 ## M4: 評価インフラ (作業量: medium、3 サブタスク)
 
 ### M4.1 客観評価スクリプト (`src/wavenext2/eval/compute_metrics.py`)
-**チケット**: [T-M4.1](tickets/T-M4.1-objective-metrics.md)
+**チケット**: T-M4.1
 
 **Deliverable**: MCD, log F0 RMSE の自動計算
 
@@ -513,7 +513,7 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、vo
 > **実装メモ (2026-05-28)**: MCD は pymcd/mel-cepstral-distance とも Windows cp313 wheel 無のため **librosa MFCC(c1..c24) + 自前 DTW** に確定 (ticket §6.1 最終手段 C、外部 MCD 依存ゼロ)。絶対値は SPTK mel-cepstrum 系の論文値と系統差ありで**相対比較主軸** (identical≈0 / 歪み単調増加で sanity)。log F0 RMSE は pyworld、両者 voiced AND マスク、無音/極短は np.nan で NaN セーフ集約。**統一 facade `runner.evaluate(model, dataset, metrics, post_filter) -> EvalResult`** を実装 (model 種別検出で Diff=reverse_sample / GAN=forward、`register_metric_backend` で UTMOS/NISQA/RTF を T-M4.2/4.3 が後付け、`eval_results/*.json` 永続化)。summary は prefix 規約 `{metric}_mean/_std/n/n_skipped`。pandas 非依存で per_utterance は list[dict]。17 tests pass、全体 375 passed。
 
 ### M4.2 UTMOS / NISQA 連携
-**チケット**: [T-M4.2](tickets/T-M4.2-utmos-nisqa.md)
+**チケット**: T-M4.2
 
 **Deliverable**: `src/wavenext2/eval/run_utmos.py`, `src/wavenext2/eval/run_nisqa.py`
 
@@ -526,7 +526,7 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、vo
 > **実装メモ (2026-05-28)**: `score_utmos`/`score_nisqa` + `_mos_common` (EvalModelNotFoundError/to_wav_list/chunked) を **全 lazy import** で実装 (本体 import path に fairseq/旧 torch を引き込まない)。speechmos/NISQA venv 未 setup 時は EvalModelNotFoundError を raise。`register_metric_backend("utmos"/"nisqa")` で `evaluate()` facade に dispatch 登録 (no-reference なので pair の synth 側を採点)。`scripts/setup_eval_models.py` (clone+venv 構築 CLI、ネットワーク要) + `eval_models/.gitkeep` + .gitignore 除外。実モデル DL は M6 評価時にユーザー実行 (M6/M7 同様の環境依存境界)。9 tests pass (未 setup エラー / monkeypatch backend / 登録)、全体 392 passed。
 
 ### M4.3 RTF 測定 (`src/wavenext2/eval/measure_rtf.py`)
-**チケット**: [T-M4.3](tickets/T-M4.3-rtf.md)
+**チケット**: T-M4.3
 
 **Deliverable**: GPU (A100) と CPU (1 core) での RTF 計測
 

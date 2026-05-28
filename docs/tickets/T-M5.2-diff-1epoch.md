@@ -18,7 +18,7 @@ related_docs:
 # T-M5.2: Diff 統合スモーク (1 sub-model train-clean-100 1 epoch)
 
 > **マイルストーン**: [M5](../milestones.md#m5-統合スモークテスト-作業量-smallwall-clock-は-gpu-数時間) / **サブタスク**: [M5.2](../milestones.md#m52-diff-wavenext-2-1-sub-model-1-epoch)
-> **依存**: [T-M3.5](T-M3.5-diff-smoke.md) (前提: [T-M3.2](T-M3.2-train-diff.md), [T-M3.3](T-M3.3-reverse-sampler.md), [T-M4.1](T-M4.1-objective-metrics.md)) / **後続**: [T-M6.2](T-M6.2-diff-full-training.md)
+> **依存**: T-M3.5 (前提: T-M3.2, T-M3.3, T-M4.1) / **後続**: [T-M6.2](T-M6.2-diff-full-training.md)
 
 ## 1. タスク目的とゴール
 

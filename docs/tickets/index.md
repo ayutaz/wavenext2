@@ -22,55 +22,57 @@
 
 > **チケット作成ステータス**: 全 29 チケットが作成済み + フェーズレビュー (architect / ML / DevOps の 3 視点) 完了。`status` 列の `pending` は **実装着手前** を意味し、チケット文書自体は完成している。
 
+> **完了チケットの個別文書削除 (2026-05-28)**: ✅ completed の 22 チケット (M0 の T-M0.1/0.2、M1〜M4 全件) の個別 `.md` は**削除済み** (git 履歴で参照可)。各チケットの §8「ゼロから作り直すとしたら」retrospective・実バグ修正・設計確定事項の要点は、下部「フェーズ完了後のレビューログ」に集約済み。未完了 (🔍 / 📝、いずれも user-gated) の 7 チケット (T-M0.3 / T-M5.1 / T-M5.2 / T-M6.* / T-M7.1) は個別文書を維持。以下の表で ✅ かつリンクなしの項目は削除済みを示す。
+
 > **注**: チケット数が milestones.md のサブタスク総数 (28) と +1 ずれる場合があるのは、`M0` を `M0.1 / M0.2 / M0.3` の 3 チケットに分割しているため、または将来サブタスクが追加されたためです。最新は下表で確認。
 
 ## M0: 環境整備とデータ準備
 
 | ID | チケット | サイズ | ステータス | 依存 | 担当 |
 |---|---|---|---|---|---|
-| T-M0.1 | [Python 環境](T-M0.1-python-env.md) | S | ✅ | — | claude |
-| T-M0.2 | [ディレクトリ scaffold](T-M0.2-scaffold.md) | S | ✅ | — | claude |
+| T-M0.1 | Python 環境 | S | ✅ | — | claude |
+| T-M0.2 | ディレクトリ scaffold | S | ✅ | — | claude |
 | T-M0.3 | [LibriTTS-R 取得](T-M0.3-libritts-r.md) | S | 🔍 | T-M0.1, T-M0.2 | claude |
 
 ## M1: コア部品 (sub-model 構成要素)
 
 | ID | チケット | サイズ | ステータス | 依存 | 担当 |
 |---|---|---|---|---|---|
-| T-M1.1 | [ConvNeXt block](T-M1.1-convnext-block.md) | M | ✅ | T-M0.2 | claude |
-| T-M1.2 | [STFT module](T-M1.2-stft-module.md) | M | ✅ | T-M0.2 | claude |
-| T-M1.3 | [Mel-spectrogram 抽出](T-M1.3-mel-spectrogram.md) | S | ✅ | T-M0.2 | claude |
-| T-M1.4 | [Generator](T-M1.4-generator.md) | M | ✅ | T-M1.1 | claude |
-| T-M1.5 | [Noise embedding (Diff)](T-M1.5-noise-embedding.md) | S | ✅ | T-M0.2 | claude |
-| T-M1.6 | [Sub-model wrapper](T-M1.6-sub-model.md) | M | ✅ | T-M1.2, T-M1.3, T-M1.4, T-M1.5 | claude |
+| T-M1.1 | ConvNeXt block | M | ✅ | T-M0.2 | claude |
+| T-M1.2 | STFT module | M | ✅ | T-M0.2 | claude |
+| T-M1.3 | Mel-spectrogram 抽出 | S | ✅ | T-M0.2 | claude |
+| T-M1.4 | Generator | M | ✅ | T-M1.1 | claude |
+| T-M1.5 | Noise embedding (Diff) | S | ✅ | T-M0.2 | claude |
+| T-M1.6 | Sub-model wrapper | M | ✅ | T-M1.2, T-M1.3, T-M1.4, T-M1.5 | claude |
 
 ## M2: GAN-WaveNeXt 2
 
 | ID | チケット | サイズ | ステータス | 依存 | 担当 |
 |---|---|---|---|---|---|
-| T-M2.1 | [Dataset](T-M2.1-dataset.md) | M | ✅ | T-M0.3, T-M1.3 | claude |
-| T-M2.2 | [Discriminator (MSD×3)](T-M2.2-discriminator.md) | M | ✅ | T-M0.2 | claude |
-| T-M2.3 | [Loss 関数](T-M2.3-losses.md) | M | ✅ | T-M0.2 | claude |
-| T-M2.4 | [GAN モデル](T-M2.4-gan-model.md) | M | ✅ | T-M1.6 | claude |
-| T-M2.5 | [Training script](T-M2.5-train-gan.md) | L | ✅ | T-M2.1, T-M2.2, T-M2.3, T-M2.4 | claude |
-| T-M2.6 | [Smoke training](T-M2.6-gan-smoke.md) | S | ✅ | T-M2.5 | claude |
+| T-M2.1 | Dataset | M | ✅ | T-M0.3, T-M1.3 | claude |
+| T-M2.2 | Discriminator (MSD×3) | M | ✅ | T-M0.2 | claude |
+| T-M2.3 | Loss 関数 | M | ✅ | T-M0.2 | claude |
+| T-M2.4 | GAN モデル | M | ✅ | T-M1.6 | claude |
+| T-M2.5 | Training script | L | ✅ | T-M2.1, T-M2.2, T-M2.3, T-M2.4 | claude |
+| T-M2.6 | Smoke training | S | ✅ | T-M2.5 | claude |
 
 ## M3: Diff-WaveNeXt 2
 
 | ID | チケット | サイズ | ステータス | 依存 | 担当 |
 |---|---|---|---|---|---|
-| T-M3.1 | [Diff モデル](T-M3.1-diff-model.md) | M | ✅ | T-M1.6 | claude |
-| T-M3.2 | [Training script](T-M3.2-train-diff.md) | L | ✅ | T-M2.1, T-M3.1 | claude |
-| T-M3.3 | [Reverse sampler](T-M3.3-reverse-sampler.md) | M | ✅ | T-M3.1 | claude |
-| T-M3.4 | [Post-filter](T-M3.4-post-filter.md) | M | ✅ | T-M3.3 | claude |
-| T-M3.5 | [Smoke training](T-M3.5-diff-smoke.md) | S | ✅ | T-M3.2, T-M3.3 | claude |
+| T-M3.1 | Diff モデル | M | ✅ | T-M1.6 | claude |
+| T-M3.2 | Training script | L | ✅ | T-M2.1, T-M3.1 | claude |
+| T-M3.3 | Reverse sampler | M | ✅ | T-M3.1 | claude |
+| T-M3.4 | Post-filter | M | ✅ | T-M3.3 | claude |
+| T-M3.5 | Smoke training | S | ✅ | T-M3.2, T-M3.3 | claude |
 
 ## M4: 評価インフラ
 
 | ID | チケット | サイズ | ステータス | 依存 | 担当 |
 |---|---|---|---|---|---|
-| T-M4.1 | [客観評価 (MCD / logF0RMSE)](T-M4.1-objective-metrics.md) | M | ✅ | T-M0.1 | claude |
-| T-M4.2 | [UTMOS / NISQA 連携](T-M4.2-utmos-nisqa.md) | M | ✅ | T-M0.1 | claude |
-| T-M4.3 | [RTF 測定](T-M4.3-rtf.md) | S | ✅ | T-M2.4, T-M3.1 | claude |
+| T-M4.1 | 客観評価 (MCD / logF0RMSE) | M | ✅ | T-M0.1 | claude |
+| T-M4.2 | UTMOS / NISQA 連携 | M | ✅ | T-M0.1 | claude |
+| T-M4.3 | RTF 測定 | S | ✅ | T-M2.4, T-M3.1 | claude |
 
 ## M5: 統合スモークテスト
 

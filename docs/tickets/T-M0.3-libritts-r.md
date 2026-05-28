@@ -19,7 +19,7 @@ related_docs:
 # T-M0.3: LibriTTS-R 取得と filelist 生成
 
 > **マイルストーン**: [M0](../milestones.md#m0-環境整備とデータ準備-作業量-small) / **サブタスク**: [M0.3](../milestones.md#m03-libritts-r-取得)
-> **依存**: [T-M0.1](T-M0.1-python-env.md), [T-M0.2](T-M0.2-scaffold.md) / **後続**: [T-M2.1](T-M2.1-dataset.md), [T-M5.1](T-M5.1-gan-1epoch.md), [T-M5.2](T-M5.2-diff-1epoch.md)
+> **依存**: T-M0.1, T-M0.2 / **後続**: T-M2.1, [T-M5.1](T-M5.1-gan-1epoch.md), [T-M5.2](T-M5.2-diff-1epoch.md)
 
 ## 1. タスク目的とゴール
 

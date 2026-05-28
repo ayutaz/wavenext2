@@ -18,7 +18,7 @@ related_docs:
 # T-M5.1: GAN 統合スモーク (train-clean-100 1 epoch)
 
 > **マイルストーン**: [M5](../milestones.md#m5-統合スモークテスト-作業量-smallwall-clock-は-gpu-数時間) / **サブタスク**: [M5.1](../milestones.md#m51-1-epoch-訓練)
-> **依存**: [T-M2.6](T-M2.6-gan-smoke.md) (前提: [T-M2.5](T-M2.5-train-gan.md), [T-M4.1](T-M4.1-objective-metrics.md)) / **後続**: [T-M6.1](T-M6.1-gan-full-training.md)
+> **依存**: T-M2.6 (前提: T-M2.5, T-M4.1) / **後続**: [T-M6.1](T-M6.1-gan-full-training.md)
 
 ## 1. タスク目的とゴール
 

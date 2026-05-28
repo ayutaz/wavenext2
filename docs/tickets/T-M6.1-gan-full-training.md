@@ -18,7 +18,7 @@ related_docs:
 # T-M6.1: GAN-WaveNeXt 2 フル訓練 (A100 約 410h、2M step)
 
 > **マイルストーン**: [M6](../milestones.md#m6-本格訓練-claude-code-は起動監視のみ-wall-clock-a100-で約-442-時間) / **サブタスク**: [M6.1](../milestones.md#m61-gan-wavenext-2-フル訓練)
-> **依存**: [T-M5.1](T-M5.1-gan-1epoch.md) (前提: [T-M2.5](T-M2.5-train-gan.md), [T-M4.1](T-M4.1-objective-metrics.md), [T-M4.3](T-M4.3-rtf.md)) / **後続**: [T-M6.3](T-M6.3-ablation.md), [T-M7.1](T-M7.1-mos-test.md)
+> **依存**: [T-M5.1](T-M5.1-gan-1epoch.md) (前提: T-M2.5, T-M4.1, T-M4.3) / **後続**: [T-M6.3](T-M6.3-ablation.md), [T-M7.1](T-M7.1-mos-test.md)
 
 ## 1. タスク目的とゴール
 
