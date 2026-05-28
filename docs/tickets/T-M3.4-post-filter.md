@@ -3,11 +3,11 @@ id: T-M3.4
 title: Time-invariant post-filter (FIR fit on dev + apply)
 milestone: M3
 phase: M3
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M3.3]
 blocks: [T-M3.5, T-M4.1]
 related_docs:
@@ -784,10 +784,15 @@ def test_freq_response_in_expected_range() -> None:
 - **post-filter の YAML config 化**: 現状 hardcode (`n_fft=512` etc.) → YAML から `n_fft`, `hop`, `fir_length` を切替可能にすると M6.3 ablation が楽
 - **`PostFilterConfig` dataclass 化**: type safety 向上、ただし dict も十分
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **crop start を (N-1)//2 から N//2 に訂正 (CRITICAL、偶数長 FIR の 1-sample 非対称)**: チケット §2 numpy 擬似コードは `start = (fir.shape[0]-1)//2 = 255` だったが、これは np.convolve(mode="same") の慣例で、**偶数長 (512) FIR で delta@256 を identity にしない** (out[j]=audio[j-1] の 1-sample シフト)。fftshift 済の中央 tap は index N//2=256 にあるので、crop start も **N//2=256** に揃えるのが正しい (full conv → `[256:256+T]`)。実測で delta@256 → identity (誤差 1.4e-6)、対称 FIR → 遅延 0 を確認。これにより torch (`conv1d(padding=K-1)` で full conv → 同 crop) と numpy (`oaconvolve(mode="full")` → 同 crop) が **bit 近似で一致** する。チケット §5 の `test_oaconvolve_vs_convolve` (np.convolve 'same' との比較) は慣例差で破綻するため、`test_apply_torch_matches_numpy` (両パス等価) + `test_apply_linear_phase_symmetric` (対称遅延) に置換。
+- **`reverse_sample` への `post_filter` 引数統合 (T-M3.3 と同期)**: T-M3.3 で実装済の `reverse_sample` に `post_filter: np.ndarray | None = None` を後付け。`(B, T)` 出力の各 row に `apply_post_filter` を適用して再 clamp。`infer_diff.py` → `post_filter.py` の import 依存を追加 (循環なし)。`post_filter=None` で plain reverse sample と bit 一致 (`test_reverse_sample_post_filter_none_is_plain`)、delta FIR で identity (`test_reverse_sample_post_filter_identity`)。
+- **`apply_post_filter` の torch path は `conv1d` で純 torch 実装**: GPU 上 post-filter / RTF 測定で CPU↔GPU 往復を回避。kernel を `flip(0)` して相関→畳み込み化、`padding=k-1` で full conv を得てから crop。np.ascontiguousarray で flip 済 FIR の contiguous 化。
+- **fit スクリプトは機構実装に留め、実 FIR fit は M6.2 後**: 未学習モデルでは `y_gen` がノイズで振幅差が無意味 (§6.1 CRITICAL)。`fit_post_filter(model, dev_audio_paths, ...)` は学習済 model を受け取る pure な集約処理として実装し、CLI (`main`) で checkpoint load → fit → `fir.npy` + `fit_stats.json` (seed/git_sha/checkpoint_sha256 の再現性 record)。`_load_model` の checkpoint format は T-M3.2/M6.2 で確定するため最小実装 (sub_{1..4}.pt 個別 load)。周波数応答テストは slow test として用意し M6.2 後に有効化。
+- **`.gitignore` は `*.npy` 全体 ignore + `!post_filter/fir.npy` 否定で除外解除**: `post_filter/*.npy` 行削除だけでは `*.npy` (line 45) が勝つため、否定 pattern が必要。`.gitkeep` で空 dir 維持。
+- **15 tests pass、全体 327 passed / 2 deselected、ruff clean**。
+- 教訓: 偶数長 linear-phase FIR の畳み込みは「中央 tap 位置 = crop start」を一貫させるのが鍵。np.convolve(mode="same") の慣例 ((N-1)//2) に従うと偶数長で 1-sample ズレる。実測スクリプトで identity / 対称性を即検証してから test を書くと、慣例差による誤った期待値を防げる。
 
 ## 9. 後続タスクへの連絡事項
 

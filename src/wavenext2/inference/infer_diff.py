@@ -29,9 +29,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import numpy as np
 import torch
 from torch import nn
 
+from wavenext2.inference.post_filter import apply_post_filter
 from wavenext2.models.diff_wavenext2 import DiffWaveNext2
 
 __all__ = ["eval_mode", "reverse_sample"]
@@ -99,6 +101,7 @@ def reverse_sample(
     *,
     seed: int | torch.Generator | None = None,
     eta: float = 1.0,
+    post_filter: np.ndarray | None = None,
 ) -> torch.Tensor:
     """DDIM/DDPM 一般形 4-step reverse sampling (β-free) で mel から波形を合成する.
 
@@ -112,6 +115,8 @@ def reverse_sample(
                torch.Generator → 外部注入 (global RNG 非汚染、T-M3.4 / T-M4.3 の反復測定用)。
         eta:   stochasticity フラグ。1.0 → DDPM (確率的、σ·z を加算) / 0.0 → DDIM (決定論的)。
                連続値 η∈[0,1] も可。
+        post_filter: (512,) linear-phase FIR (T-M3.4)。与えると各 batch 要素に
+               `apply_post_filter` を適用して再 clamp。None で post-filter 無効 (plain reverse sample)。
 
     Returns:
         (B, T_audio) 合成波形 ∈ [-1, 1]、`T_audio = T_mel * model.hop_length`。
@@ -120,7 +125,7 @@ def reverse_sample(
         - **β を一切計算しない** (§6.1 CRITICAL): denoising 方向で ᾱ_t < ᾱ_next ⇒ σ² ≥ 0。
         - `@torch.no_grad()` で autograd graph を構築しない。
         - `eval_mode(model)` で model.training を保護 (内部で eval に切替・復元、§8.1 h)。
-        - post-filter は本関数では適用しない (T-M3.4)。
+        - post-filter は `post_filter` 引数を与えた場合のみ適用 (T-M3.4、apply/no-apply switch)。
     """
     if mel.dim() != 3:
         raise ValueError(f"mel must be (B, 128, T_mel), got {tuple(mel.shape)}")
@@ -174,7 +179,12 @@ def reverse_sample(
                 # 3. 最終 step (t=K): ᾱ_next = 1 で x_0 推定値がそのまま出力
                 x = x0_hat
 
-    return x.clamp(-1.0, 1.0)
+    x = x.clamp(-1.0, 1.0)
+    if post_filter is not None:
+        # 各 batch 要素に linear-phase FIR を畳み込み (T-M3.4)、再 clamp。
+        rows = [apply_post_filter(x[i], post_filter) for i in range(x.shape[0])]
+        x = torch.stack(rows, dim=0).clamp(-1.0, 1.0)
+    return x
 
 
 # import 副作用: DiffWaveNext2.synthesize を reverse_sample alias として注入 (§8.2 / §9.1)。

@@ -460,20 +460,23 @@ def reverse_sample(model, mel, *, seed=None, eta=1.0):
 
 ```python
 # scripts/fit_post_filter.py
-def fit_post_filter(model, dev_loader, n_fft=512, hop=256, fir_length=512):
-    # 振幅差平均 → iRFFT → fftshift → fir.npy 保存
+def fit_post_filter(model, dev_audio_paths, n_fft=512, hop=256, fir_length=512, seed=43):
+    # |Y_gt|-|Y_gen| を全 (utt×frame) 平均 → iRFFT → fftshift → fir.npy + fit_stats.json
     ...
 
 # src/wavenext2/inference/post_filter.py
-def apply_post_filter(audio, fir):
-    return np.convolve(audio, fir, mode="same")
+def apply_post_filter(audio, fir):  # torch / numpy 両受け
+    # full conv → [N//2 : N//2+T] 切り出し (linear-phase, length-preserving)
+    ...
 ```
 
 **Acceptance**:
-- [ ] dev set 100 utterances で fit してエラーなく fir.npy を生成
-- [ ] FIR 長 = 512 (linear-phase 用 fftshift 済み)
-- [ ] 周波数応答が ~2 kHz 以下で ≈ 0 dB、Nyquist 端で +5〜8 dB (Okamoto21 Fig 3a と整合)
-- [ ] apply 前後で音声長が変わらない (`mode="same"`)
+- [x] dev set 200 utterances で fit してエラーなく fir.npy を生成 — **fit 機構を実装** (`fit_post_filter` + CLI)。実 FIR の fit/周波数応答検証は M6.2 の Diff フル訓練後 (未学習モデルでは無意味、§6.1 CRITICAL)
+- [x] FIR 長 = 512 (linear-phase 用 fftshift 済み、`load_post_filter` で検証)
+- [ ] 周波数応答が ~2 kHz 以下で ≈ 0 dB、Nyquist 端で +5〜8 dB (Okamoto21 Fig 3a) — **M6.2 後の実 FIR で検証** (`test_freq_response_in_expected_range` slow test として用意)
+- [x] apply 前後で音声長が変わらない (`test_apply_preserves_length`、torch/numpy 両パス)
+
+> **実装メモ (2026-05-28)**: `apply_post_filter` は **torch.Tensor / np.ndarray 両受け** (full conv → `[N//2:N//2+T]` 切り出しで統一)。チケット §2 擬似コードの crop start=(N-1)//2 は偶数長 FIR で 1-sample 非対称になるため **N//2=256 に訂正** (delta@256 が厳密 identity、§8.3)。`reverse_sample(post_filter=fir|None)` で apply/no-apply switch を統合。`fir.npy` は `.gitignore` で `!post_filter/fir.npy` 除外解除 (M6.2 後 commit)。15 tests pass、全体 327 passed。
 
 ### M3.5 Smoke training
 **チケット**: [T-M3.5](tickets/T-M3.5-diff-smoke.md)

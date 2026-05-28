@@ -43,7 +43,8 @@ tensorboard/
 
 # 後処理 (post-filter FIR)
 *.npy
-post_filter/*.npy
+# fir.npy は M6.2 後に commit (2 KB、reproducibility は fit_stats.json で担保、T-M3.4)。
+!post_filter/fir.npy
 
 # =========================================================================
 # Python
