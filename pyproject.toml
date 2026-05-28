@@ -20,9 +20,10 @@ dependencies = [
     "tqdm",
     "pyworld",
     "einops",
-    # MCD ライブラリ (pymcd) は pysptk 経由で Windows cp313 に prebuilt wheel が無く
-    # MSVC ビルドを要求するため base 依存から除外。MCD 計算の実装方針は T-M4.1 で確定
-    # (pure-Python 実装 or mel-cepstral-distance)。log-F0 RMSE は pyworld で充足。
+    # MCD: pymcd / mel-cepstral-distance は pysptk 経由で Windows cp313 prebuilt wheel が無いため
+    # 採用せず、T-M4.1 で librosa MFCC (c1..c24) + 自前 DTW 実装に確定 (ticket §6.1 最終手段 C、
+    # 外部 MCD 依存ゼロ)。絶対値は SPTK mel-cepstrum 系の論文値と系統差あり相対比較主軸 (§8.2)。
+    # log-F0 RMSE は pyworld DIO+StoneMask で充足。
 ]
 
 [project.scripts]

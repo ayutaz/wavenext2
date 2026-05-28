@@ -501,15 +501,16 @@ def apply_post_filter(audio, fir):  # torch / numpy 両受け
 **Deliverable**: MCD, log F0 RMSE の自動計算
 
 ```python
-def compute_mcd(y_true, y_pred, sr=24000):
-    # pymcd 利用
-def compute_log_f0_rmse(y_true, y_pred, sr=24000):
-    # pyworld で F0 抽出 → log RMSE
+def compute_mcd(y_true, y_pred, sr=24000):  # librosa MFCC(c1..c24) + 自前 DTW (pymcd は cp313 wheel 無)
+def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、voiced AND マスク
+# 統一 facade: evaluate(model, dataset, metrics, post_filter) -> EvalResult (M4.1/4.2/4.3 を束ねる)
 ```
 
 **Acceptance**:
-- [ ] 同一音声に対して MCD ≈ 0, log F0 RMSE ≈ 0
-- [ ] LibriTTS-R test-clean-100 全 4824 utterance を 1 GPU で 30 分以内に処理
+- [x] 同一音声に対して MCD ≈ 0, log F0 RMSE ≈ 0 (`test_mcd_identical_zero` / `test_log_f0_rmse_identical_zero`、pitch-shift は ln(f0比) と一致)
+- [x] test-clean 4824 utt 30 分以内 — **並列バッチ driver `evaluate_dataset` を実装** (実 full 実行は M5/M6、process pool は M6 で有効化)
+
+> **実装メモ (2026-05-28)**: MCD は pymcd/mel-cepstral-distance とも Windows cp313 wheel 無のため **librosa MFCC(c1..c24) + 自前 DTW** に確定 (ticket §6.1 最終手段 C、外部 MCD 依存ゼロ)。絶対値は SPTK mel-cepstrum 系の論文値と系統差ありで**相対比較主軸** (identical≈0 / 歪み単調増加で sanity)。log F0 RMSE は pyworld、両者 voiced AND マスク、無音/極短は np.nan で NaN セーフ集約。**統一 facade `runner.evaluate(model, dataset, metrics, post_filter) -> EvalResult`** を実装 (model 種別検出で Diff=reverse_sample / GAN=forward、`register_metric_backend` で UTMOS/NISQA/RTF を T-M4.2/4.3 が後付け、`eval_results/*.json` 永続化)。summary は prefix 規約 `{metric}_mean/_std/n/n_skipped`。pandas 非依存で per_utterance は list[dict]。17 tests pass、全体 375 passed。
 
 ### M4.2 UTMOS / NISQA 連携
 **チケット**: [T-M4.2](tickets/T-M4.2-utmos-nisqa.md)

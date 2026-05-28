@@ -3,11 +3,11 @@ id: T-M4.1
 title: 客観評価スクリプト (MCD + log F0 RMSE)
 milestone: M4
 phase: M4
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M0.1]
 blocks: [T-M5.1, T-M5.2]
 related_docs:
@@ -511,9 +511,14 @@ def _resolve_mcd_backend(name: str | None):
 - **`evaluate_dataset` 戻り値は `(summary_dict, per_utt_df)` tuple (採用済)**: per-utterance 生値を保持し、M6 ablation の分布分析・JSON 永続化の入力にする (旧「見直し余地」を §8.1 で採用昇格)
 - **MR-STFT を eval に含める是非**: validation の checkpoint 選択基準 (WaveFit-PT) と整合させるため含めるが、論文 Table 1〜3 は MR-STFT を主要指標にしていない → `metrics` 引数でオプトイン (デフォルト含めるが外せる)
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **MCD バックエンドは最終手段 C (librosa MFCC + 自前 DTW) に確定**: pymcd / mel-cepstral-distance とも Windows cp313 prebuilt wheel が無く (pyproject の既存コメント通り)、対策 A/B が使えないため §6.1 の対策 C を採用。`librosa.feature.mfcc` (n_mfcc=25 で c0 除外 → c1..c24) を mel-cepstrum proxy とし、`librosa.sequence.dtw` で整列、`MCD = (10/ln10)·√2·mean(√Σ(Δc)²)`。identical=0.0、noise で単調増加 (0.01→499, 0.2→852)、pitch-shift の log F0 RMSE は ln(170/150)=0.1252 と厳密一致を実測確認。**絶対値は SPTK mel-cepstrum 系の論文値と桁違い** (librosa MFCC が正規化されていないため) なので相対比較主軸 (§8.2) を docstring/milestones に明記。
+- **pandas を依存に追加せず per_utterance は list[dict]**: pandas も cp313 環境に未インストールで、EvalResult schema が "list[dict] or DataFrame" を許容するため list[dict] を採用。JSON 直列化が自明になり `to_json`/`from_json` が素直。M6 の分布分析は list[dict] → 必要時 caller 側で DataFrame 化。
+- **統一 facade の backend registry パターン**: UTMOS/NISQA (T-M4.2)/RTF (T-M4.3) は `register_metric_backend(name, fn)` で後付け登録する設計に。facade (M4.1) は mcd/log_f0_rmse を直接処理し、未登録 metric は `NotImplementedError` で T-M4.2/4.3 を案内。これで M4.1 が先行マージでき、後続 2 チケットが facade を壊さず差し込める。
+- **JSON roundtrip の nan != nan 罠**: 未訓練 model の合成波形は F0 が全 unvoiced → log_f0_rmse=nan。`json.dumps` は nan を `NaN` token で書き `json.loads` が nan に戻すが、dict 等価比較で nan!=nan により roundtrip テストが偽 fail。roundtrip 検証は finite な MCD で行うことで回避 (実害なし、設計判断として記録)。`np.nanmean` の all-nan 警告も `np.any(~isnan)` ガードで抑制。
+- **17 tests pass、全体 375 passed / 7 deselected、ruff clean**。
+- 教訓: 外部ライブラリの wheel 可用性は実装着手時に必ず確認 (pymcd は ticket 段階から cp313 不可が判明済だった)。「絶対値が論文と一致しない proxy」でも identical≈0 + 単調性 + 既知の解析解 (ln(f0比)) との一致で正当性は担保できる。facade の拡張点を registry にすると依存順 (M4.1 → M4.2/4.3) を崩さず段階実装できる。
 
 ## 9. 後続タスクへの連絡事項
 
