@@ -1,0 +1,65 @@
+# =============================================================================
+# Diff-WaveNeXt 2 smoke 設定 (T-M3.5)
+# 1 utterance × 1000 step overfit。primary = sub-model 4 (c 幅 0.48、conditioning 感度 ~70x)。
+# 本番 diff_wavenext2.yaml と分離。GPU smoke (test_smoke_completes_sub_model_4) が参照。
+# =============================================================================
+seed: 42
+model:
+  type: diff_wavenext2
+  sub_model_idx: 4              # PRIMARY smoke: 最難 sub-model (pass すれば他は安全)
+  noise_emb:
+    c_rescale: 1.0              # 1.0 / 1000.0 切替で smoke 内 ablation (sub-model 4 fail 時、T-M1.5)
+  sub_model:
+    n_mels: 128
+    sample_rate: 24000
+    hop: 256
+    n_fft: 1024
+    win_length: 1024
+    f_min: 20
+    f_max: 12000
+    convnext:
+      n_blocks: 8
+      embed_dim: 512
+      intermediate_dim: 1536
+      kernel_size: 7
+    noise_level_embedding:
+      sinusoidal_dim: 128
+      fc2: [512, 512]
+train:
+  batch_size: 1
+  segment_length: 25600         # Diff hop=256 × 100 frames
+  num_workers: 0
+  max_steps: 1000
+  grad_clip_norm: 1.0
+  seed: 42
+  smoke_idx: 0                  # Subset([0]) で固定 utterance
+  optimizer:
+    type: Adam
+    lr: 2.0e-4
+    betas: [0.9, 0.98]
+    weight_decay: 0.0
+validation:
+  interval_steps: 0             # smoke では validation off
+  num_utterances: 0
+checkpoint:
+  dir: checkpoints/smoke_diff
+  interval_steps: 0
+logging:
+  tensorboard_dir: logs/smoke_diff
+  scalar_interval_steps: 50
+  histogram_interval_steps: 0
+data:
+  root_dir: /path/to/LibriTTS-R     # GPU smoke 実行時に実パスへ
+  train_filelist: filelists/train.tsv
+  val_filelist: filelists/val.tsv
+  mel:
+    sample_rate: 24000
+    n_fft: 1024
+    win_length: 1024
+    n_mels: 128
+    f_min: 20
+    f_max: 12000
+    power: 1.0
+    mel_scale: slaney
+    norm: slaney
+    log_eps: 1.0e-5

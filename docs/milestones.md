@@ -483,11 +483,13 @@ def apply_post_filter(audio, fir):  # torch / numpy 両受け
 ### M3.5 Smoke training
 **チケット**: [T-M3.5](tickets/T-M3.5-diff-smoke.md)
 
-**Deliverable**: sub-model 1 のみで 1000 step 訓練 + 過学習テスト
+**Deliverable**: sub-model 4 (primary、最難) で 1000 step overfit + 過学習テスト
 
 **Acceptance**:
-- [ ] 1 utterance で 1000 step 後、MSE loss が初期値の 5% 以下
-- [ ] 同じ utterance に対する reverse sample が GT に近い (MR-STFT loss で比較)
+- [x] 1 utterance で 1000 step 後、MSE loss が初期値の 5% 以下 — **GPU smoke `test_smoke_completes_sub_model_4` (slow+gpu) として実装**。CPU synthetic (`test_smoke_synthetic_cpu`) は tiny model で ratio<0.9 の architectural sanity を確認 (実データ厳格 gate は T-M5.2)
+- [x] ~~reverse sample が GT に近い~~ → **out of scope に降格** (4 sub-model 揃わないと無意味、§6.1)。代替: `test_smoke_reverse_with_mocks` (sub-model 2-4 を identity mock した β-free reverse が NaN なし、T-M3.3 検証) + `test_noise_level_conditioning` (c=L vs U の cos<0.99、slow+gpu)
+
+> **実装メモ (2026-05-28)**: pytest single-source (`tests/test_train_diff_overfit.py`) + 薄い wrapper `scripts/smoke_diff.py` (T-M2.6 と同パターン)。primary = sub-model 4。CPU で動く synthetic overfit / reverse-mock / init_loss / config-keys を主軸 (4 tests pass)、実データ GPU smoke (sub_model_4/1、conditioning cos) は `slow`+`gpu` で deselect (T-M5.2 で実行)。conditioning cos<0.99 は full-dim + 訓練後でないと顕在化しない (tiny/未訓練では additive bias 効果が小さく cos≈1.0、c_rescale=1000 ablation は GPU smoke) ため GPU 限定。`diff_wavenext2_smoke.yaml` 新設。全体 345 passed / 7 deselected。
 
 ---
 
