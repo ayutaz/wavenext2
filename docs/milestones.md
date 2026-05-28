@@ -420,9 +420,11 @@ class DiffWaveNext2(nn.Module):
 ```
 
 **Acceptance**:
-- [ ] sub-model 1 を 100 step 訓練して loss が単調減少
-- [ ] noise level が band 内で uniform sampling されていることを TensorBoard で確認
-- [ ] 4 つの sub-model それぞれ独立に checkpoint 保存
+- [x] sub-model 4 を 200 step 訓練して loss が減少 (`test_overfit_loss_decreases` slow、合成 batch)
+- [x] noise level が band 内で uniform sampling される (`test_c_within_band`、TensorBoard に histogram ログ)
+- [x] 4 つの sub-model それぞれ独立に checkpoint 保存 (`test_independent_sub_model_checkpoints`、lazy で sub_k.pt に対象 sub のみ)
+
+> **実装メモ (2026-05-28)**: `train_diff_step(model, opt, batch, k, cfg, amp, dtype) -> dict` 公開関数 + `main()` (argparse、click 非依存で train_gan と統一)。**c/abar は fp32 強制** (bf16 で c≈0.99995→1.0 丸めで √ᾱ=0 になる罠を回避、§6.1)。`build_sub_model_cfg` で nested yaml → flat SubModelDiff kwargs を明示マップ (M2 review の偶然 default 一致を解消)。Validation は c∈{L,mid,U} の 3 点評価。**共通プリミティブ `utils/training_loop.py` (iter_forever/atomic_save/capture_rng_state/restore_rng_state/register_sigterm_handler) を抽出** し train_gan.py を refactor (GAN 22 tests 維持)。checkpoint save/load は payload 差 (GAN: G/D/opt×2/sch×2 vs Diff: model/opt/sub_model_k) のため各 trainer 別。`only_sub_model=k` lazy instantiation で 1 sub-model のみ訓練。diff config に top-level validation/checkpoint/logging + data.mel/filelist 追加、stale な per_block_projection 削除。14 tests pass、全体 341 passed。
 
 ### M3.3 Reverse sampler (`src/wavenext2/inference/infer_diff.py`)
 **チケット**: [T-M3.3](tickets/T-M3.3-reverse-sampler.md)

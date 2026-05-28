@@ -46,13 +46,16 @@ model:
       linear2_bias: false
       output_clip: [-1.0, 1.0]
     init: trunc_normal_0.02
-    noise_level_embedding:      # FastDiff `module/FastDiff_model.py` で確定
+    noise_level_embedding:      # FastDiff `module/FastDiff_model.py` ベース
       sinusoidal_dim: 128       # log(10000)/63 log-spaced, sin||cos
       fc1: [128, 512]
-      fc2: [512, 512]
+      fc2: [512, 512]           # 出力 = cond_dim (= ConvNeXt embed_dim)
       activation: silu          # swish = SiLU
       injection: additive_bias  # NOT FiLM
-      per_block_projection: true  # 各 ConvNeXt block ごとに独立 Linear(512, 512)
+      # per-block 独立 Linear(512,512) は撤去 (Table 1 と +14% 乖離、open-questions §C7、2026-05-27)。
+      # 共有 NoiseEmbedding を射影なしで各 ConvNeXt block 入口に additive 注入。
+  noise_emb:
+    c_rescale: 1.0              # conditioning 入力の scale (1.0 default / 1000.0 は smoke ablation, T-M1.5 §9.1)
   post_filter:
     enabled: true
     type: time_invariant_spectral_enhancement   # Okamoto21 §3
@@ -65,8 +68,9 @@ train:
   batch_size: 20
   segment_length: 25600         # FastDiff 準拠
   num_workers: 4
-  max_steps_per_sub_model: 1_000_000
+  max_steps: 1_000_000          # sub-model あたり (旧 max_steps_per_sub_model)
   grad_clip_norm: 1.0
+  seed: 0                       # worker_init_fn base seed (sub-model 別 offset を加算)
   optimizer:
     type: Adam
     lr: 2.0e-4
@@ -74,14 +78,36 @@ train:
     weight_decay: 0.0
   ema:
     enabled: false              # FastDiff も未使用
-  validation:
-    interval_steps: 10000
-    metric: mse_noise           # ε prediction の MSE
-    num_utterances: 100
+# validation / checkpoint / logging は top-level (train_diff.py が cfg["..."] で参照)
+validation:
+  interval_steps: 10000
+  num_utterances: 100
+  metric: mse_noise             # ε prediction の MSE (c ∈ {L, mid, U} の 3 点平均)
+checkpoint:
+  dir: checkpoints/diff
+  interval_steps: 10000
+logging:
+  tensorboard_dir: logs/diff
+  scalar_interval_steps: 100
+  histogram_interval_steps: 1000  # noise level c の band 内 uniform sampling 確認用
 data:
   root: /path/to/LibriTTS-R     # 実環境では --src-dir / .env で上書き
+  root_dir: /path/to/LibriTTS-R # build_loaders 用 (T-M5.2/T-M6.2 で実パスに差し替え)
+  train_filelist: filelists/train.tsv  # T-M0.3 生成物
+  val_filelist: filelists/val.tsv      # speaker-balanced、shuffle=False
   subsets: [train-clean-100, train-clean-360]
   sample_rate: 24000
+  mel:                          # LogMelSpectrogram.from_config 用 (hop は model.sub_model.hop に同期)
+    sample_rate: 24000
+    n_fft: 1024
+    win_length: 1024
+    n_mels: 128
+    f_min: 20
+    f_max: 12000
+    power: 1.0
+    mel_scale: slaney
+    norm: slaney
+    log_eps: 1.0e-5
   audio_normalization:          # Vocos sox `norm` と数値等価な peak 正規化
     method: peak_norm           # torchaudio 2.11 で sox 廃止のため自前実装 (T-M0.1 §9.1)
     train_gain_db: [-6.0, -1.0]

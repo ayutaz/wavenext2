@@ -3,11 +3,11 @@ id: T-M3.2
 title: Diff 訓練スクリプト (4 sub-model 独立 MSE 訓練、CLI 経由で sub-model 指定)
 milestone: M3
 phase: M3
-status: pending
+status: completed
 size: L
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M2.1, T-M3.1]
 blocks: [T-M3.5, T-M5.2]
 related_docs:
@@ -1431,10 +1431,16 @@ uv run python -m wavenext2.train.train_diff --config configs/diff_wavenext2.yaml
 - T-M5.2 (1 sub-model 1 epoch) で sub-model 別の validation MSE が plateau に達さなければ、Loss normalization / v-prediction を検討
 - T-M6.2 (4 sub-model 本格訓練) で sub-model 4 が他より loss が flat なら、Loss normalization / log-uniform sampling を採用
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **`utils/training_loop.py` の抽出範囲は「真に共通なプリミティブ」のみ (M2 review の判断を実装で確定)**: GAN/Diff の `save_checkpoint`/`load_checkpoint` は payload が本質的に異なる (GAN: G/D/opt_G/opt_D/sch_G/sch_D、Diff: model/opt/sub_model_k) ため統一せず各 trainer に残した。共通化したのは `iter_forever` / `atomic_save` / `capture_rng_state` / `restore_rng_state` / `register_sigterm_handler` の 5 つ。これらは両 trainer がコピペになる低レベル処理で、各 save/load はこれらを内部で使う。チケット §2.2 が想定した「`run_validation` を dict 対応に拡張して共有」は採らず、Diff 固有の 3 点 evaluation (`run_validation_diff`) を train_diff.py に置いた (GAN の run_validation は float 返却のままで干渉しない)。train_gan.py を refactor 後も GAN 22 tests は維持。
+- **CLI は click でなく argparse (train_gan と統一)**: チケット §2.2 擬似コードは `@click.command()` だが、click は依存に無く train_gan.py も argparse を採用済み。一貫性のため argparse に統一。`--sub-model` は `choices=[1,2,3,4]`。
+- **config nested→flat マッピングを `build_sub_model_cfg` で明示関数化 (M2 review 申し送り解消)**: yaml `model.sub_model` は `n_mels`/`hop`/nested `convnext`/`noise_level_embedding` で、SubModelDiff の flat kwargs (`mel_channels`/`hop_length`/`dim`/...) と名前が異なる。従来は SubModelDiff.from_config の allowed-key フィルタで無視され **偶然 default が一致して動いていた** (脆弱)。明示マップ関数で `n_mels→mel_channels`、`hop→hop_length`、`convnext.embed_dim→dim`、`noise_level_embedding.fc2[-1]→cond_dim` 等を変換。実 config で 14,354,434 params (Table 1 整合) を再現することをテストで pin。
+- **c/abar の fp32 強制 (§6.1 Critical) は autocast(enabled=False) ブロックで実現**: sub-model 1 の c≈0.99995 は bf16 mantissa (8-bit) で 1.0 に丸まり、abar=1-c²=0 → √ᾱ=0 で x_t から x_0 成分が消失する。`with torch.autocast(device_type, enabled=False)` で c_fp32/abar/sqrt_abar を fp32 計算し、x_t 構成時に x_gt.dtype へ cast。
+- **diff config の stale な `per_block_projection: true` を削除**: fc_t 撤去 (open-questions §C7) が config に未反映だった。`noise_emb.c_rescale: 1.0` (T-M1.5 ablation pathway) と top-level validation/checkpoint/logging + data.mel/filelist/root_dir を追加 (GAN config と構造を揃え build_loaders が動く形に)。
+- **sub-model 別 worker seed offset**: `--sub-model k` を 4 並列起動したとき同じ worker_id で seed が衝突しないよう `seed_worker(worker_id + k*1_000_000 + base_seed)` で分離。
+- **14 tests pass (overfit は slow)、全体 341 passed / 3 deselected、ruff clean、GAN refactor 後も 22 tests 維持**。
+- 教訓: 「共通化」は signature が一致する処理に限定するのが正解。payload や制御フローが違うものを無理に共通化すると `**kwargs` や分岐で可読性が落ちる。低レベルプリミティブ (atomic I/O・RNG・signal) だけ括り出し、ドメイン固有の組み立ては各所に残すのが保守的。config の「偶然 default 一致で動く」状態は明示マッピング関数 + Table1 整合テストで固定するのが安全。
 
 ## 9. 後続タスクへの連絡事項
 

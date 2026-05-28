@@ -21,14 +21,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import random
-import signal
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -45,6 +40,13 @@ from wavenext2.models.gan_wavenext2 import GANWaveNext2
 from wavenext2.utils.config import load_config
 from wavenext2.utils.scheduler import InverseLR
 from wavenext2.utils.seed import set_seed
+from wavenext2.utils.training_loop import (
+    atomic_save,
+    capture_rng_state,
+    iter_forever,
+    register_sigterm_handler,
+    restore_rng_state,
+)
 
 __all__ = ["TrainState", "main", "train_gan_step"]
 
@@ -216,18 +218,11 @@ def save_checkpoint(
         "opt_D_state_dict": opt_D.state_dict(),
         "sch_G_state_dict": sch_G.state_dict(),
         "sch_D_state_dict": sch_D.state_dict(),
-        "rng_state": {
-            "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            "numpy": np.random.get_state(),
-            "python": random.getstate(),
-        },
+        "rng_state": capture_rng_state(),
         "config": cfg,
     }
     if atomic:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        torch.save(ckpt, tmp)
-        os.replace(tmp, path)  # POSIX/Windows 共通で atomic
+        atomic_save(ckpt, path)  # `.tmp` → os.replace (utils.training_loop)
     else:
         torch.save(ckpt, path)
 
@@ -249,15 +244,7 @@ def load_checkpoint(
     opt_D.load_state_dict(ckpt["opt_D_state_dict"])
     sch_G.load_state_dict(ckpt["sch_G_state_dict"])
     sch_D.load_state_dict(ckpt["sch_D_state_dict"])
-    rng = ckpt.get("rng_state", {})
-    if rng.get("torch") is not None:
-        torch.set_rng_state(rng["torch"])
-    if rng.get("cuda") is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(rng["cuda"])
-    if rng.get("numpy") is not None:
-        np.random.set_state(rng["numpy"])
-    if rng.get("python") is not None:
-        random.setstate(rng["python"])
+    restore_rng_state(ckpt.get("rng_state"))
     return TrainState(
         step=ckpt["step"],
         best_val_mrstft=ckpt.get("best_val_mrstft", float("inf")),
@@ -289,12 +276,6 @@ def build_loaders(cfg: dict) -> tuple[DataLoader, DataLoader]:
     )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=2, drop_last=False)
     return train_loader, val_loader
-
-
-def iter_forever(loader: DataLoader):
-    """DataLoader を無限に回す (epoch 境界をまたぐ)。"""
-    while True:
-        yield from loader
 
 
 def log_scalars(
@@ -347,8 +328,8 @@ def main(argv: list[str] | None = None) -> None:
     ckpt_dir = Path(cfg["checkpoint"]["dir"])
     writer = SummaryWriter(cfg["logging"]["tensorboard_dir"])
 
-    def _emergency_save(signum: int, frame: Any) -> None:  # noqa: ARG001
-        save_checkpoint(
+    register_sigterm_handler(
+        lambda: save_checkpoint(
             ckpt_dir / f"emergency_step_{state.step}.pt",
             G,
             D,
@@ -360,10 +341,7 @@ def main(argv: list[str] | None = None) -> None:
             cfg,
             atomic=True,
         )
-        raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, _emergency_save)
-    signal.signal(signal.SIGINT, _emergency_save)
+    )
 
     train_loader, val_loader = build_loaders(cfg)
     G.train()

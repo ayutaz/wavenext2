@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 train-gan = "wavenext2.train.train_gan:main"
+train-diff = "wavenext2.train.train_diff:main"
 
 [dependency-groups]
 dev = [
