@@ -3,11 +3,11 @@ id: T-M3.1
 title: Diff-WaveNeXt 2 モデル (4 sub-model + point-specialized partition)
 milestone: M3
 phase: M3
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M1.6]
 blocks: [T-M3.2, T-M3.3, T-M4.3]
 related_docs:
@@ -794,10 +794,15 @@ class DiffWaveNext2(nn.Module):
   - **`reverse_sample` を class method ではなく外部関数 (`infer_diff.reverse_sample(model, mel)`) として実装**: T-M3.3 で決定。本チケットはスタブを置くのみ
   - **`from_config` factory 追加**: T-M1.6 §8.2 (factory パターン全モジュール一貫化) と整合させるため、本チケットでも `DiffWaveNext2.from_config(cfg)` を追加 (採用済)
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **`from_config` の `mode=` 引数は実装に存在しない**: チケット §2.2 / §2.4 の擬似コード `SubModelDiff.from_config(sub_model_cfg, mode="diff")` は誤り (M2 review 申し送り #5 で指摘済)。実 API は `SubModelDiff.from_config(cfg)` のみ (`src/wavenext2/models/sub_model.py:139`)。本実装は `SubModelDiff.from_config(cfg)` を使用。GAN/Diff の区別は `SubModelGAN` / `SubModelDiff` の **クラス自体** で表現されており、`mode=` フラグは不要な設計。
+- **`NOISE_SCHEDULE_ABAR` は class attribute ではなく buffer への property alias で実装**: チケット擬似コードは class attribute (`NOISE_SCHEDULE_ABAR = torch.tensor(...)`) と buffer の併用だったが、class attribute の Tensor は device 追従しない (`model.to("cuda")` 後も CPU のまま)。T-M3.3 が `model.NOISE_SCHEDULE_ABAR.to(device)` で参照する際、buffer 経由 property (`@property def NOISE_SCHEDULE_ABAR -> buffer`) なら device-aware かつ load_state_dict 整合性を両立できる。class level の immutable 定数明示は `NOISE_SCHEDULE_ABAR_DEFAULT` (tuple) が担う。
+- **パラメータ数は Table 1 と一致しない (既知、fc_t 撤去)**: 実装値は 1 sub-model = **14,354,434** (14.354M)、×4 = **57,417,736** (57.42M)。Table 1 (14.42M / 57.68M) に対し −0.46%。これは M1 で per-block fc_t (2.1M) を撤去した結果 (docs/open-questions.md §C7)。テストは厳密実装値 (`== 14_354_434`) で pin しつつ、Table 1 への近接 (±1%) も別 assert で担保した。チケット §5.1 の `± 0.05M` 許容は fc_t 撤去前の値 (14.42M) 基準だったため、撤去後の実装値に合わせて訂正。
+- **`_validate_band_bounds` は lower < upper チェックを追加**: チケット擬似コードの隣接整合 + 全体被覆に加え、各 band の `lower < upper` も検証 (monkeypatch で改変した bad bounds を確実に検出するため)。`__init__` 冒頭で呼ぶ (sub-model instantiate 前に fail-fast)。
+- **`synthesize` staticmethod alias は未実装 (T-M3.3 follow-up)**: §8.1 採用昇格の `DiffWaveNext2.synthesize = staticmethod(reverse_sample)` は reverse_sample 本実装 (T-M3.3) 完成後に有効化する設計のため、本チケットでは追加せず。T-M3.3 完了時に注入する。
+- **45 tests pass、全体 275 passed / 1 skipped / 2 deselected、ruff clean**。
+- 教訓: チケット擬似コードは「設計意図の記録」であり実 API と乖離しうる (特に fc_t 撤去のような後発の確定事項が反映されていない箇所)。実装着手時は必ず依存先の実コード (`sub_model.py`) のシグネチャを Read で確認してから書く。
 
 ## 9. 後続タスクへの連絡事項
 

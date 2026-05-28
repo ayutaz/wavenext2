@@ -402,9 +402,11 @@ class DiffWaveNext2(nn.Module):
 ```
 
 **Acceptance**:
-- [ ] 4 sub-model それぞれが独立してパラメータを保持
-- [ ] `sample_noise_level(k=1)` の値が `[0.9929, 1.0]` に収まる (k=2,3,4 も同様)
-- [ ] パラメータ総数 = 4 × 14.42M ≈ 57.68M (Table 1)
+- [x] 4 sub-model それぞれが独立してパラメータを保持 (`nn.ModuleList`、重み非共有、`test_param_independence`)
+- [x] `sample_noise_level(k=1)` の値が `[0.9929, 1.0]` に収まる (k=2,3,4 も同様、`test_sample_noise_level_range`)
+- [x] パラメータ総数 = 4 × 14.354M = 57.42M (fc_t 撤去後の実装値、Table 1 57.68M に対し −0.46%。±1% 以内で `test_param_count_total`)
+
+> **実装メモ (2026-05-28)**: `from_config` は `mode=` 引数を取らない実 API に合わせた (チケット擬似コードの `SubModelDiff.from_config(cfg, mode="diff")` は誤り、M2 review 申し送り済)。`NOISE_SCHEDULE_ABAR` は buffer `noise_schedule_abar` への device-aware property alias として公開 (T-M3.3 が `model.NOISE_SCHEDULE_ABAR.to(device)` で参照)。`from_config(only_sub_model=k)` で 1 sub-model のみ lazy instantiate (他は None placeholder)。45 tests pass。
 
 ### M3.2 Training script (`src/wavenext2/train/train_diff.py`)
 **チケット**: [T-M3.2](tickets/T-M3.2-train-diff.md)

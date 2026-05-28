@@ -512,6 +512,7 @@ class SubModelDiff(nn.Module):
    - **案**: `SubModelDiff` 外で `STFTModule` を 1 個 init して DI (`SubModelDiff(stft_module=...)`)
    - **再評価トリガー**: M3.1 実装時のメモリ profiling で 16KB が問題にならなければ却下、問題なら採用
    - **現状**: 本チケットでは未採用 (M1 段階では sub-model ごとに独立保持、§8.1 案 7 と整合)。M3.1 で要再評価。
+   - **✅ M3.1 で不採用確定 (2026-05-28)**: 16KB は微小で optimization 不要、sub-model が独立構造を保つ方が構造的整合性が高い (各 sub-model が pure に独立)。`DiffWaveNext2` は 4 個の `SubModelDiff` を `nn.ModuleList` で保持し、各々が独立 `STFTModule` を持つ。詳細は T-M3.1 §6.1 / §9.1。
 
 10. **`runtime_checkable Protocol` で `forward` signature を duck-type 統一**:
     - **メリット**: 継承不要、TorchScript 互換、Python 3.13 の `typing.Protocol` で型チェック可能
