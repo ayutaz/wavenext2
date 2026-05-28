@@ -563,6 +563,8 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、vo
 
 > **足場実装メモ (2026-05-28)**: T-M5.1 と共通 orchestrator (`run_smoke.py --mode diff`) + `configs/diff_wavenext2_1epoch.yaml` + `scripts/eval_diff_checkpoint.py`。実 1 epoch 訓練は GPU + データ要で user 実行。
 
+> **テスト補強メモ (2026-05-28, 08321b1)**: M3 review が「`main()`/`build_loaders` 全面未テスト → 実データ要で T-M5.2 繰延」とした最大ギャップを、`tests/test_train_main_integration.py` が `load_config`/`build_loaders` の monkeypatch + tiny config + 合成 loader で**実 LibriTTS-R・GPU なしにクローズ** (train_gan/train_diff の `main()` loop/step/validation/checkpoint/resume/debug を CPU 検証、両者 54-61%→92%、全体行カバレッジ 84%→93%、414 passed)。本 M5 に残るのは実データでの収束性・OOM・conditioning・β reverse の実 NaN 確認のみ (user-gated)。
+
 ---
 
 ## M6: 本格訓練 (Claude Code は起動・監視のみ、wall-clock: A100 で約 442 時間)

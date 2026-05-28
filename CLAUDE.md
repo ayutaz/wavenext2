@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 論文 URL: https://arxiv.org/abs/2605.25506
 - デモ: https://37integer.github.io/WAVENEXT-2
 
-現時点ではコードは未着手で、論文内容を整理したドキュメント (`docs/`) のみが存在する。
+**実装状況 (2026-05-28)**: M0〜M4 完了 + M5 足場実装済み (`docs/tickets/index.md` の進捗サマリ参照)。`src/wavenext2/` にコア部品 (ConvNeXt block / STFT module / Mel / Generator / NoiseEmbedding / Sub-model)・GAN-WaveNeXt 2 (Discriminator / loss / 訓練・推論)・Diff-WaveNeXt 2 (4 sub-model / reverse sampler / post-filter / 訓練)・評価インフラ (MCD / log F0 RMSE / UTMOS / NISQA / RTF / 統一 facade)・統合スモークの足場 (divergence gate / orchestrator) が揃い、414 tests / 行カバレッジ 93%。**残る M5 実行・M6 (本格訓練)・M7 (主観評価)・T-M0.3 (LibriTTS-R 取得) は GPU クラスタ・課金・評価者・データ DL 認証を要するユーザー操作必須境界**で未着手。
 
 ## 重要ドキュメント (実装前に必読)
 

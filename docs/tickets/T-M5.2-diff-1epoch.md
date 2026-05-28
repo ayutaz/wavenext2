@@ -209,6 +209,7 @@ T-M3.5 から昇格する確認軸:
 
 - **T-M5.1 と共通 orchestrator で DRY 実装**: `eval/gate.py::diff_divergence_gate(loss_mse, output) -> GateResult` (loss 単調減少傾向・波形 finite/[-1,1]/非無音・NaN なし) + `scripts/run_smoke.py --mode diff` + `configs/diff_wavenext2_1epoch.yaml` + `scripts/eval_diff_checkpoint.py`。GAN/Diff の gate は閾値 (Diff は loss_adv/loss_d なし) のみ差分、orchestrator は `--mode` で分岐。
 - **実 1 epoch + conditioning 検証は GPU + データ必須**: noise level conditioning (cos<0.99)・β-free reverse の実 NaN 確認・c_rescale ablation はいずれも GPU smoke (T-M3.5 で実装済の slow+gpu テスト) + 1 epoch 実訓練で決着する項目で、user 実行環境に委ねる。
+- **`main()` の CPU 統合 smoke は実データなしで先行クローズ (2026-05-28, 08321b1)**: M3 review が「H1: `main()`/`build_loaders` 全面未テスト → 実データ要で本チケットへ繰延」とした点を、`tests/test_train_main_integration.py` が `load_config`/`build_loaders` の monkeypatch + tiny config + 合成 loader で**実 LibriTTS-R・GPU なしに閉じた** (`train_diff.main` の loop/step/validation/checkpoint/resume/debug-single-step を CPU 検証、train_diff 61%→92%)。本チケットに残るのは **実データでの収束性・OOM 耐性・conditioning 生存・β 負値 reverse の実 NaN 確認**のみ (いずれも GPU + T-M0.3 データ必須の user-gated)。
 - 詳細な学びは T-M5.1 §8.3 と共通 (M5 = M6/M7 同様のユーザー操作必須境界、divergence gate の純関数化)。
 - **β 負値 gate 判断**: TBD (実 eps_pred 2-step reverse で NaN 有無を確認、T-M3.5 reverse-mock で構造的に NaN なしは確認済)
 - **`c * 1000` rescale 判断**: TBD (sub-model 4 conditioning が cos<0.99/<0.5 を満たすかで確定)
