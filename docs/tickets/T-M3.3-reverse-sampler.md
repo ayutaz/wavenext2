@@ -3,11 +3,11 @@ id: T-M3.3
 title: Reverse sampler (DDPM 4-step + 1-to-1 dispatch + post-filter プレースホルダ)
 milestone: M3
 phase: M3
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-27
+updated: 2026-05-28
 depends_on: [T-M3.1]
 blocks: [T-M3.4, T-M3.5, T-M4.3]
 related_docs:
@@ -718,10 +718,15 @@ def reverse_sample(
   - メリット: model と coefficients の責務統一
   - 却下 (v1): pure helper として切り出した方が unit test 容易、再利用性高 (将来 DDIM 等で別 step 数を使う際にも流用可)
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **チケット §2 の擬似コードがほぼそのまま実装に使えた**: M3 phase review で β-free 式・eta・eval_mode・seed 3 形式が事前確定していたため、設計判断の出戻りなし。CRITICAL (β 負値) が解決済みで、`_compute_ddpm_coefficients` が β/α を持たない構造が NaN 発生を構造的に排除。実 model でも `test_real_model_no_negative_beta_nan` で確認。
+- **`DiffWaveNext2.synthesize = reverse_sample` の method binding が成立**: `reverse_sample` の第 1 引数が `model` なので、class attribute として代入すると `model.synthesize(mel, seed=...)` が `reverse_sample(model, mel, seed=...)` に束縛される。`@torch.no_grad()` で wrap 済みでも `functools.wraps` 経由で plain function のままなので binding に影響しない。T-M3.1 で deferred としていた alias を本チケットで注入完了 (`test_synthesize_alias` で同等性検証)。
+- **`seed: int | torch.Generator | None` の 3 形式正規化**: `isinstance(seed, torch.Generator)` を最初に判定 (Generator は int ではないため順序は任意だが明示)。int の場合のみ `torch.Generator(device).manual_seed(int(seed))` で local 生成。`test_no_global_seed_pollution` で `torch.random.get_rng_state()` が seed 指定時に不変なことを確認。
+- **`eval_mode` を reverse_sample 内部で常時使用 (§8.1 h の phase review 判断を採用)**: §6.1 の「呼び出し側責務」は phase review で「内部で eval_mode を使い train 状態を復元」に更新された。`test_reverse_sample_restores_training_state` で `model.train()` 状態が呼び出し後も保持されることを確認。`test_model_eval_not_forced` の旧意図 (例外を上げず動く) も満たす。
+- **mock sub-model で dispatch 検証**: 実 DiffWaveNext2 (~57.42M) は重いため、`_MockSub` (eps=x*scale、call 記録) + `_MockModel` (noise_schedule_abar buffer + NOISE_SCHEDULE_ABAR property) で軽量化。`call_count==1` / denoising 順 (idx 0→3) / c_t=√(1-ᾱ_t) を 1.65 秒で検証。実 model 結合テストは別 fixture (module scope) で最小限。
+- **37 tests pass、全体 312 passed / 1 skipped / 2 deselected、ruff clean**。
+- 教訓: phase review で CRITICAL を事前解決し §2 コードを確定形にしておくと、実装は写経に近くなり高速・低リスク。mock interface は実 class の必要属性 (`sub_models` / `hop_length` / `NOISE_SCHEDULE_ABAR`) だけを最小実装すれば dispatch ロジックを実 model 非依存に検証できる。
 
 ## 9. 後続タスクへの連絡事項
 

@@ -427,25 +427,31 @@ class DiffWaveNext2(nn.Module):
 ### M3.3 Reverse sampler (`src/wavenext2/inference/infer_diff.py`)
 **チケット**: [T-M3.3](tickets/T-M3.3-reverse-sampler.md)
 
-**Deliverable**: DDPM 標準形 4-step sampling + 1-to-1 dispatch
+**Deliverable**: x_0 予測経由 DDIM/DDPM 一般形 (β-free) 4-step sampling + 1-to-1 dispatch
 
 ```python
-def reverse_sample(model, mel, T=4):
-    # 詳細は docs/training.md §4.2
-    abar = SCHEDULE_ABAR
-    beta = ...  # 隣接 abar から逆算
-    sigma = ...
-    x = torch.randn(...)
-    for t in range(T):
-        c_t = sqrt(1 - abar[t])
-        eps_pred = model.sub_models[t](mel, x, c_t)
-        x = reverse_step(x, eps_pred, beta, abar, t, sigma)
-    return x
+@torch.no_grad()
+def reverse_sample(model, mel, *, seed=None, eta=1.0):
+    # 詳細は docs/training.md §4.2 / T-M3.3。β は一切計算しない (denoising 順で ᾱ 増加列のため
+    # β=1-ᾱ_t/ᾱ_{t-1} が負値になり発散)。x_0 予測経由で σ²≥0 が構造的に保証される。
+    abar = model.NOISE_SCHEDULE_ABAR            # [1e-4, 2.8e-2, 5.6e-1, 9.1e-1]
+    x = randn(...)
+    for t in 1..K:                              # 1-to-1 dispatch: sub_models[t-1]
+        eps = model.sub_models[t-1](mel, x, c_t=sqrt(1-abar_t))
+        x0_hat = ((x - sqrt(1-abar_t)*eps) / sqrt(abar_t)).clamp(-1, 1)
+        if t < K:
+            sigma2 = eta**2 * (1-abar_next)/(1-abar_t) * (1 - abar_t/abar_next)
+            x = sqrt(abar_next)*x0_hat + sqrt(clamp(1-abar_next-sigma2,0))*eps + (eta>0: sigma*z)
+        else:
+            x = x0_hat                          # 最終 step は ᾱ_next=1
+    return x.clamp(-1, 1)
 ```
 
 **Acceptance**:
-- [ ] mel → 4 step で `[-1, 1]` 範囲の波形が出力される
-- [ ] 同じ mel + 同じ seed で deterministic
+- [x] mel → 4 step で `[-1, 1]` 範囲の波形が出力される (`test_output_range` / `test_with_real_diff_model`)
+- [x] 同じ mel + 同じ seed で deterministic (`test_same_seed_deterministic` / `test_seed_with_external_generator`)
+
+> **実装メモ (2026-05-28)**: `_compute_ddpm_coefficients` (β-free pure helper) + `reverse_sample(model, mel, *, seed=None, eta=1.0)` + `eval_mode(model)` context manager を実装。`seed` は `int | torch.Generator | None` の 3 形式 (global RNG 非汚染)。`eta=1.0` DDPM / `eta=0.0` DDIM を 1 引数切替。`infer_diff.py` 末尾の import 副作用で `DiffWaveNext2.synthesize = reverse_sample` を注入 (T-M4.3 が GAN/Diff 横断で `model.synthesize(mel)` 計測可能)。37 tests pass (mock で call_count==1 / dispatch order / σ²≥0 / β-free 検証)。全体 312 passed。
 
 ### M3.4 Post-filter (`src/wavenext2/inference/post_filter.py` + `scripts/fit_post_filter.py`)
 **チケット**: [T-M3.4](tickets/T-M3.4-post-filter.md)

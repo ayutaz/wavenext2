@@ -1,6 +1,5 @@
-"""wavenext2.inference public API.
+"""wavenext2.inference public API."""
 
-TODO: 後続チケットで `__all__` に re-export を追加。
-"""
+from wavenext2.inference.infer_diff import eval_mode, reverse_sample
 
-# __all__ = []  # 後続チケットで明示
+__all__ = ["eval_mode", "reverse_sample"]
