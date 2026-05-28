@@ -3,11 +3,11 @@ id: T-M5.2
 title: Diff 統合スモーク (1 sub-model train-clean-100 1 epoch)
 milestone: M5
 phase: M5
-status: pending
+status: in_review
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M3.5]
 blocks: [T-M6.2]
 related_docs:
@@ -205,9 +205,12 @@ T-M3.5 から昇格する確認軸:
 - **smoke (T-M3.5) と 1epoch (本チケット) の責務分離**: smoke = architectural sanity (1 utterance overfit)、1epoch = 収束性・汎化・OOM (実データ)。粒度は適切
 - **M6 への gate という位置づけ**: 本 gate が pass = sub-model 4 (+1) が実データで学習し reverse が NaN を出さない証跡。4 sub-model 統合品質 (full reverse sample) は M6.2 で別評価
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- **β 負値 gate 判断**: TBD (実 eps_pred 2-step reverse で NaN 有無を確認)
+### 8.3 学んだこと (2026-05-28 足場実装、実行は user-gated)
+
+- **T-M5.1 と共通 orchestrator で DRY 実装**: `eval/gate.py::diff_divergence_gate(loss_mse, output) -> GateResult` (loss 単調減少傾向・波形 finite/[-1,1]/非無音・NaN なし) + `scripts/run_smoke.py --mode diff` + `configs/diff_wavenext2_1epoch.yaml` + `scripts/eval_diff_checkpoint.py`。GAN/Diff の gate は閾値 (Diff は loss_adv/loss_d なし) のみ差分、orchestrator は `--mode` で分岐。
+- **実 1 epoch + conditioning 検証は GPU + データ必須**: noise level conditioning (cos<0.99)・β-free reverse の実 NaN 確認・c_rescale ablation はいずれも GPU smoke (T-M3.5 で実装済の slow+gpu テスト) + 1 epoch 実訓練で決着する項目で、user 実行環境に委ねる。
+- 詳細な学びは T-M5.1 §8.3 と共通 (M5 = M6/M7 同様のユーザー操作必須境界、divergence gate の純関数化)。
+- **β 負値 gate 判断**: TBD (実 eps_pred 2-step reverse で NaN 有無を確認、T-M3.5 reverse-mock で構造的に NaN なしは確認済)
 - **`c * 1000` rescale 判断**: TBD (sub-model 4 conditioning が cos<0.99/<0.5 を満たすかで確定)
 - **bf16 fp32 強制判断**: TBD (sub-model 1 の c 精度が保たれるかで確定)
 - **wall-clock 実測**: TBD (`ceil(N_train/20)` step の A100 / T4 実時間、M6.2 32h との比例)

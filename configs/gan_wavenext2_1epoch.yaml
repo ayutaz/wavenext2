@@ -1,0 +1,120 @@
+# =============================================================================
+# GAN-WaveNeXt 2 — 1 epoch 統合スモーク設定 (T-M5.1)
+# smoke (T-M2.6, overfit) と本番 (T-M6.1, 2M step) の中間。train-clean-100 ≈ 33k step。
+# divergence gate (eval/gate.py) で「発散の不在」を確認し M6 起動 GO/NO-GO の材料にする。
+# 本番 gan_wavenext2.yaml との差分: max_steps / checkpoint.dir / logging.tensorboard_dir のみ。
+# =============================================================================
+model:
+  type: gan_wavenext2
+  T: 4
+  share_sub_models: false
+  initial_input: zeros
+  sub_model:
+    n_mels: 128
+    sample_rate: 24000
+    hop: 300
+    n_fft: 2048
+    win_length: 1200
+    f_min: 20
+    f_max: 12000
+    mel:
+      power: 1.0
+      mel_scale: slaney
+      norm: slaney
+      log_eps: 1.0e-5
+    stft_module:
+      n_fft: 2048
+      win_length: 1200
+      hop: 300
+      window: hann
+      center: true
+      normalized: false
+    convnext:
+      n_blocks: 8
+      embed_dim: 512
+      intermediate_dim: 1536
+      kernel_size: 7
+      layer_scale_init: 1.0e-6
+    head:
+      linear1_out: 2050
+      linear1_bias: true
+      linear2_out: 300
+      linear2_bias: false
+      output_clip: [-1.0, 1.0]
+    init: trunc_normal_0.02
+discriminator:
+  type: msd_only
+  num_D: 3
+  ndf: 16
+  layers: 4
+  downsampling_factor: 4
+loss:
+  adversarial: hinge
+  fm_loss: l1
+  mrstft:
+    n_ffts: [512, 1024, 2048]
+    win_lengths: [360, 900, 1800]
+    hop_sizes: [80, 150, 300]
+    eps: 1.0e-5
+  weights:
+    d_gan: 1.0
+    d_fm: 10.0
+    mrstft_sc: 2.5
+    mrstft_mag: 2.5
+    mel_mae: 0.0
+train:
+  batch_size: 16                # OOM 時は 8 or --amp
+  segment_length: 16384
+  num_workers: 8
+  max_steps: 33000              # train-clean-100 の約 1 epoch (T-M5.1)
+  grad_clip_norm: 1.0
+  seed: 42
+  optimizer:
+    type: AdamW
+    lr_g: 1.0e-4
+    lr_d: 2.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 1.0e-3
+  scheduler:
+    type: InverseLR
+    inv_gamma: 200000
+    power: 0.5
+    warmup: 0.999
+  ema:
+    enabled: false
+  amp:
+    enabled: false
+    dtype: bfloat16
+validation:
+  interval_steps: 10000         # 1 epoch 中 ~3 回
+  num_utterances: 100
+  metric: mrstft_total
+checkpoint:
+  dir: checkpoints/gan_1epoch    # 本番と分離
+  interval_steps: 10000
+  keep_last_n: 5
+logging:
+  tensorboard_dir: logs/gan_1epoch
+  scalar_interval_steps: 100
+data:
+  root: /path/to/LibriTTS-R
+  root_dir: /path/to/LibriTTS-R  # T-M0.3 取得後に実パスへ
+  train_filelist: filelists/train.tsv
+  val_filelist: filelists/val.tsv
+  subsets: [train-clean-100]
+  sample_rate: 24000
+  mel:
+    sample_rate: 24000
+    n_fft: 2048
+    win_length: 1200
+    n_mels: 128
+    f_min: 20
+    f_max: 12000
+    power: 1.0
+    mel_scale: slaney
+    norm: slaney
+    log_eps: 1.0e-5
+  audio_normalization:
+    method: peak_norm
+    train_gain_db: [-6.0, -1.0]
+    val_gain_db: -3.0

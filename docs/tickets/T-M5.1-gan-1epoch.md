@@ -3,11 +3,11 @@ id: T-M5.1
 title: GAN 統合スモーク (train-clean-100 1 epoch)
 milestone: M5
 phase: M5
-status: pending
+status: in_review
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M2.6]
 blocks: [T-M6.1]
 related_docs:
@@ -316,9 +316,15 @@ OOM/divergence resume が成立するには、checkpoint に **optimizer / sched
 - **【重要】gate 判定者 = user の GO/NO-GO**: M6 は **GPU 課金が発生するユーザー操作**。したがって gate の最終判定は **user 承認 (GO/NO-GO) を明示的に要する**。Claude Code (Reviewer) の役割は判定を下すことではなく、「divergence gate の自動項目 (3 指標 + finite/clip/NaN) の pass/fail + sample audio 4 本」を提示し **GO/NO-GO 推奨を出す** ことに留める。最終的に課金前のボタンを押すのは user
 - **CI 不可 (GPU runner 必須)**: 本チケットの e2e は GPU を要するため通常の CI には乗らない (`@pytest.mark.slow @pytest.mark.gpu`)。GPU runner が無い限り自動 CI ゲートにはできず、user 環境での手動起動 + Reviewer の GO/NO-GO 推奨が実体
 
-### 8.3 学んだこと (チケット完了後に追記)
-- (実装完了後に追記)
-- **eps=1e-7 vs 1e-5 判断**: TBD (発散有無で確定)
+### 8.3 学んだこと (2026-05-28 足場実装、実行は user-gated)
+
+- **M5 は M6/M7 同様のユーザー操作必須境界**: 実 1 epoch 訓練は GPU 数時間 + T-M0.3 実 LibriTTS-R + M6 課金前の **user GO/NO-GO 判定** (§8.2) で、Claude では実行不可。自律実装の範囲は「非ゲートの足場」= divergence gate ロジック + 共通 orchestrator + 中間 config + 薄い eval driver + テスト。実行・判定は user。
+- **divergence gate を機械判定可能な純関数に**: `eval/gate.py::gan_divergence_gate(loss_g, loss_adv, loss_d, output) -> GateResult` で「発散の不在」(loss_G 単調減少傾向・loss_adv∈(0.5,2.0)・loss_D≥0.01・波形 finite/[-1,1]/非無音・NaN なし) を自動判定。傾向判定は前半平均>後半平均で step 揺らぎに頑健、履歴 <4 は pass 寄り。MR-STFT<30% は品質目安に降格 (1 epoch=本番の 1.6% で品質は測れない、§8.2)。
+- **共通 orchestrator `run_smoke.py --mode {gan,diff}`** (M5 review §8.1): metrics JSON → gate 判定 → GO/NO-GO レポート → JSON 永続化、gate fail で exit 1。GAN/Diff 差分は `--mode` と loss キーのみ。訓練起動自体は GPU 要のため orchestrator は起動せず、訓練+eval が出力した metrics を判定する設計 (テスト可能・再現可能)。
+- **再評価 4 項目 (eps/sampler/segment_length/D update 比) は実データ必須のため未確定**: いずれも 1 epoch の実 loss curve / grad_norm p99 / 話者分散を見て判断する項目で、実行時に user 環境で決着 → T-M6.1 へ申し送り。
+- **18 tests pass (gate 各 fail mode / orchestrator / 中間 config parse)、ruff clean**。
+- 教訓: GPU/データ/課金が絡む gate は「判定ロジックを純関数化して機械判定を自動化・テスト可能にし、実行と最終承認だけ user に残す」と、コードは完成・実行は委譲を両立できる。divergence gate (発散の不在) は品質 gate より早期・安価・解釈明快。
+- **eps=1e-7 vs 1e-5 判断**: TBD (実行時の発散有無 + grad_norm p99 / loss_G 振動幅で確定)
 - **speaker-balanced sampler 判断**: TBD (validation MR-STFT の話者分散で確定)
 - **D update 比判断**: TBD (loss_D < 0.01 連続有無で確定)
 - **segment_length 判断**: TBD (MR-STFT 収束速度で確定)

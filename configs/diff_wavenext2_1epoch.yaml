@@ -1,0 +1,81 @@
+# =============================================================================
+# Diff-WaveNeXt 2 — 1 sub-model 1 epoch 統合スモーク設定 (T-M5.2)
+# smoke (T-M3.5, overfit) と本番 (T-M6.2, 1M step × 4 sub-model) の中間。
+# CLI --sub-model {1,2,3,4} で 1 sub-model を train-clean-100 ≈ 33k step 訓練。
+# 本番 diff_wavenext2.yaml との差分: max_steps / checkpoint.dir / logging.tensorboard_dir のみ。
+# =============================================================================
+model:
+  type: diff_wavenext2
+  num_sub_models: 4
+  noise_schedule: [1.0e-04, 2.8e-02, 5.6e-01, 9.1e-01]
+  partition: point_specialized
+  band_boundaries:
+    sub_model_1: [0.9929, 1.0]
+    sub_model_2: [0.8246, 0.9929]
+    sub_model_3: [0.4817, 0.8246]
+    sub_model_4: [0.0, 0.4817]
+  sub_model:
+    n_mels: 128
+    sample_rate: 24000
+    hop: 256
+    n_fft: 1024
+    win_length: 1024
+    f_min: 20
+    f_max: 12000
+    convnext:
+      n_blocks: 8
+      embed_dim: 512
+      intermediate_dim: 1536
+      kernel_size: 7
+    noise_level_embedding:
+      sinusoidal_dim: 128
+      fc2: [512, 512]
+  noise_emb:
+    c_rescale: 1.0
+train:
+  batch_size: 20
+  segment_length: 25600
+  num_workers: 4
+  max_steps: 33000              # train-clean-100 の約 1 epoch (sub-model あたり、T-M5.2)
+  grad_clip_norm: 1.0
+  seed: 0
+  optimizer:
+    type: Adam
+    lr: 2.0e-4
+    betas: [0.9, 0.98]
+    weight_decay: 0.0
+  ema:
+    enabled: false
+validation:
+  interval_steps: 10000
+  num_utterances: 100
+  metric: mse_noise
+checkpoint:
+  dir: checkpoints/diff_1epoch   # 本番と分離
+  interval_steps: 10000
+logging:
+  tensorboard_dir: logs/diff_1epoch
+  scalar_interval_steps: 100
+  histogram_interval_steps: 1000
+data:
+  root: /path/to/LibriTTS-R
+  root_dir: /path/to/LibriTTS-R  # T-M0.3 取得後に実パスへ
+  train_filelist: filelists/train.tsv
+  val_filelist: filelists/val.tsv
+  subsets: [train-clean-100]
+  sample_rate: 24000
+  mel:
+    sample_rate: 24000
+    n_fft: 1024
+    win_length: 1024
+    n_mels: 128
+    f_min: 20
+    f_max: 12000
+    power: 1.0
+    mel_scale: slaney
+    norm: slaney
+    log_eps: 1.0e-5
+  audio_normalization:
+    method: peak_norm
+    train_gain_db: [-6.0, -1.0]
+    val_gain_db: -3.0

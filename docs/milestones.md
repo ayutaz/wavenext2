@@ -545,19 +545,23 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、vo
 
 **Deliverable**: GAN-WaveNeXt 2 を train-clean-100 で 1 epoch (約 33k step) 訓練
 
-**Acceptance**:
-- [ ] OOM なしで完走
-- [ ] 1 epoch 後の generator が validation utterances に対して MR-STFT loss < 初期値の 30%
-- [ ] 生成音声の聴感: 明らかな破綻なし (ノイズだらけ・全部 0 ではない)
+**Acceptance** (🔍 足場実装済 / 実行は GPU + 実 LibriTTS-R 要のユーザー操作):
+- [ ] OOM なしで完走 — **実行 user-gated** (GPU + T-M0.3 データ)
+- [ ] gate を品質でなく **divergence gate** に (M5 review §8.1): loss_G 単調減少・loss_adv∈(0.5,2.0)・loss_D≥0.01・波形 finite/[-1,1]/非無音・NaN なし。MR-STFT<30% は目安に降格。**`eval/gate.py::gan_divergence_gate` + `scripts/run_smoke.py --mode gan` を実装**、機械判定は自動
+- [ ] 聴感破綻なし — **人間 + user GO/NO-GO** (M6 課金前)
+
+> **足場実装メモ (2026-05-28)**: 実 1 epoch 訓練は GPU 数時間 + T-M0.3 データ + M6 課金前の user GO/NO-GO 判定で、M6/M7 同様のユーザー操作必須境界。非ゲートの足場を実装: `eval/gate.py` (divergence gate 純関数 + GateResult/OutputStats)、`scripts/run_smoke.py --mode {gan,diff}` (共通 orchestrator: metrics→gate→GO/NO-GO レポート→JSON、fail で exit 1)、`configs/gan_wavenext2_1epoch.yaml` (max_steps=33k)、`scripts/eval_gan_checkpoint.py` (evaluate() 薄い driver)。18 tests pass。実行・判定は user。
 
 ### M5.2 Diff-WaveNeXt 2 1 sub-model 1 epoch
 **チケット**: [T-M5.2](tickets/T-M5.2-diff-1epoch.md)
 
-**Deliverable**: sub-model 1 を train-clean-100 で 1 epoch 訓練
+**Deliverable**: sub-model を train-clean-100 で 1 epoch 訓練
 
-**Acceptance**:
-- [ ] OOM なしで完走
-- [ ] noise level conditioning が機能 (異なる noise level で異なる出力)
+**Acceptance** (🔍 足場実装済 / 実行は user-gated):
+- [ ] OOM なしで完走 — **実行 user-gated**
+- [ ] divergence gate (loss MSE 単調減少・波形 finite/[-1,1]/非無音・NaN なし) — **`eval/gate.py::diff_divergence_gate` + `run_smoke.py --mode diff` 実装**、conditioning は GPU smoke (T-M3.5) で
+
+> **足場実装メモ (2026-05-28)**: T-M5.1 と共通 orchestrator (`run_smoke.py --mode diff`) + `configs/diff_wavenext2_1epoch.yaml` + `scripts/eval_diff_checkpoint.py`。実 1 epoch 訓練は GPU + データ要で user 実行。
 
 ---
 
