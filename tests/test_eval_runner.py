@@ -70,8 +70,9 @@ def test_eval_result_json_roundtrip(model: DiffWaveNext2, tmp_path) -> None:
 
 
 def test_evaluate_unknown_metric_raises(model: DiffWaveNext2) -> None:
-    with pytest.raises(NotImplementedError, match="utmos"):
-        evaluate(model, _dataset(), metrics=("utmos",))
+    # 未登録 metric は NotImplementedError (utmos/nisqa は T-M4.2 で登録済のため別名を使う)。
+    with pytest.raises(NotImplementedError, match="totally_unknown_metric"):
+        evaluate(model, _dataset(), metrics=("totally_unknown_metric",))
 
 
 def test_register_metric_backend_dispatch(model: DiffWaveNext2) -> None:

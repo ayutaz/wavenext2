@@ -3,11 +3,11 @@ id: T-M4.2
 title: UTMOS / NISQA 連携 (自動 MOS 推定)
 milestone: M4
 phase: M4
-status: pending
+status: completed
 size: M
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M0.1]
 blocks: [T-M5.1, T-M5.2]
 related_docs:
@@ -572,9 +572,14 @@ CI (実モデル不在) でも回せるよう、subprocess を mock した経路
 - **期待値 acceptance の扱い**: 実 LibriTTS-R GT で外れたら、(a) 16 kHz resample 設定 (sr 不一致は UTMOS を系統的に下げる、§6.1)、(b) subset の選び方、(c) UTMOS strong/wide/naive の別、(d) backend (公式 vs speechmos) の系統差、を見直す。acceptance は「GT > 劣化音声」の**相対比較**を一次基準に置く。
 - **本体プロジェクトとの境界**: UTMOS/NISQA (の fairseq 依存) を本体 `pyproject.toml` に絶対入れないという制約は、再現性 (T-M0.1 lock のクリーンさ) を守る上で重要。この境界を破ると `uv sync` が壊れて全フェーズに波及するため、§7 レビューで厳格にチェック。なお speechmos default 経路は torch.hub 経由で本体 venv 内 import するが、`speechmos` パッケージ自体は軽量で torch>=2.10 と両立するため許容 (fairseq は引き込まない)。
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 実装中に判明した想定外: (未着手)
-- 次の似たタスクで応用できる教訓: (未着手)
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **実モデル DL/採点は M6/M7 同様の環境依存境界として委ねる**: speechmos/NISQA/torchcrepe とも未インストール + 初回 model download にネットワーク要、NISQA は Python 3.9 別 venv 必須。自律実装の範囲は「lazy import の wrapper + graceful error + facade backend 登録 + setup スクリプト + mock テスト」とし、実 UTMOS≥3.8/NISQA≥4.2 の実測は M5/M6 のユーザー実行環境に委ねた (feedback-autonomous-tickets の境界判断)。
+- **全 lazy import で本体 import path を保護**: `score_utmos` は `from speechmos import utmos22_strong` を関数内 import、`run_nisqa` は subprocess 隔離 (本体 venv に旧 torch を引き込まない)。`wavenext2.eval` の top-level import (run_utmos/run_nisqa) は backend 登録の副作用だけで heavy dep を load しないことをテストで担保 (import が軽い)。
+- **backend registry の副作用登録が facade テストと干渉**: run_utmos/run_nisqa を `eval/__init__` で import すると "utmos"/"nisqa" が `_METRIC_BACKENDS` に登録され、T-M4.1 の `test_evaluate_unknown_metric_raises` が metrics=("utmos",) で NotImplementedError を期待していたのが EvalModelNotFoundError に変わって壊れた → 未登録 metric 名 ("totally_unknown_metric") に変更。**import 副作用で global registry を変える設計はテスト間結合を生む**ことを再確認 (registry 自体は妥当だが、テストは「真に未登録」な名前で書く)。
+- **EvalModelNotFoundError で silent NaN を排除**: model 未取得を例外にすることで、評価 pipeline が「0 点」や nan を黙って混ぜず即座に setup 不足を知らせる。F0 抽出失敗 (T-M4.1) は np.nan (データ起因で skip 妥当) だが、model 未 setup は環境起因なので例外、という使い分け。
+- **9 tests pass (未 setup エラー / to_wav_list / chunked / 登録 / monkeypatch fake speechmos)、全体 392 passed、ruff clean**。
+- 教訓: 外部 NN 評価器は (a) lazy import で本体を保護、(b) 未取得を明示例外、(c) facade には backend 登録で後付け、(d) テストは fake module を sys.modules に monkeypatch して実 model 非依存に検証、の 4 点で「コードは完成・実行は環境次第」を両立できる。
 
 ## 9. 後続タスクへの連絡事項
 

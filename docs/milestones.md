@@ -517,11 +517,13 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、vo
 
 **Deliverable**: `src/wavenext2/eval/run_utmos.py`, `src/wavenext2/eval/run_nisqa.py`
 
-- UTMOS: https://github.com/sarulab-speech/UTMOS22 を git submodule
-- NISQA: https://github.com/gabrielmittag/NISQA を pip install
+- UTMOS: default は speechmos (`torch.hub` lazy)、fairseq UTMOS22 は subprocess 隔離 opt-in
+- NISQA: 別 venv (Python 3.9) を subprocess 隔離
 
 **Acceptance**:
-- [ ] GT 音声で UTMOS ≈ 4.0±0.2, NISQA ≈ 4.5±0.3 (LibriTTS-R は高品質なため)
+- [x] GT 音声で UTMOS / NISQA を採点する wrapper を実装 — **実モデル DL/採点はネットワーク+別 venv 要 (ユーザー実行)**。コードは lazy import + EvalModelNotFoundError (silent NaN なし) + facade backend 登録まで完了、UTMOS≥3.8/NISQA≥4.2 の実測は M5/M6 で
+
+> **実装メモ (2026-05-28)**: `score_utmos`/`score_nisqa` + `_mos_common` (EvalModelNotFoundError/to_wav_list/chunked) を **全 lazy import** で実装 (本体 import path に fairseq/旧 torch を引き込まない)。speechmos/NISQA venv 未 setup 時は EvalModelNotFoundError を raise。`register_metric_backend("utmos"/"nisqa")` で `evaluate()` facade に dispatch 登録 (no-reference なので pair の synth 側を採点)。`scripts/setup_eval_models.py` (clone+venv 構築 CLI、ネットワーク要) + `eval_models/.gitkeep` + .gitignore 除外。実モデル DL は M6 評価時にユーザー実行 (M6/M7 同様の環境依存境界)。9 tests pass (未 setup エラー / monkeypatch backend / 登録)、全体 392 passed。
 
 ### M4.3 RTF 測定 (`src/wavenext2/eval/measure_rtf.py`)
 **チケット**: [T-M4.3](tickets/T-M4.3-rtf.md)

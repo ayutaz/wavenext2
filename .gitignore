@@ -100,6 +100,14 @@ eval_results/
 mos_test/
 mos_results/
 generated_samples/
+# 外部 eval モデル (UTMOS22 / NISQA clone・checkpoint・専用 venv) は除外。
+# eval_models/.gitkeep と requirements-*.lock は keep (除外対象外)。
+eval_models/UTMOS22/
+eval_models/NISQA/
+eval_models/.venv-*/
+eval_models/*.ckpt
+eval_models/*.tar
+eval_models/*manifest*.json
 
 # =========================================================================
 # secrets / ローカル環境 (.env.example のみ commit)
