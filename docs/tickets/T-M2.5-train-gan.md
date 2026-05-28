@@ -946,6 +946,11 @@ uv run python -m wavenext2.train.train_gan --config configs/gan_wavenext2.yaml -
 - **config schema**: `validation`/`checkpoint`/`logging` を **top-level** に置く設計に統一 (ticket §2.5 準拠)。既存 yaml は `train.validation` 入れ子だったため移動。`model.sub_model` の nested 値は `GANWaveNext2.from_config` 経由では既定値にフォールバックするが、GAN 既定 (n_fft=2048/hop=300/win=1200/mel=128) が config 値と一致するため正しく動作 (nested→flat の厳密マッピングは real-data 経路を実走する T-M5.1 で詰める)。
 - 想定外: `train_gan_step` を public 関数として切り出した設計 (§8.1 採用昇格) が、synthetic tensor だけで CPU 上で全 loss 経路を unit テストできる利点を実証 (real-data 不要)。`build_loaders`/`main` の real-data 経路は T-M5.1 まで未実走。
 - 教訓: 完了済 component の戻り値・signature を実装着手時に Read で確認してから配線する。ticket 擬似コードは作成時点の想定で、実装後の API と乖離する (今回 MR-STFT 戻り値・Discriminator 出力・from_config signature の 3 点)。
+- **⚠️ M2 phase review (2026-05-28) 訂正**:
+  - **`train_gan_step` と `train_diff_step` の signature 統一は不可能** (本 §8.1 の「同 signature / fixture 共用」記述は誤り)。GAN は `(G, D, opt_G, opt_D, sch_G, sch_D, mel, audio, cfg, crit, ...)` の敵対的 2 系統、Diff は `(model, opt, batch, k, cfg, ...)` の単一 model + MSE (scheduler/crit/D なし)。共通なのは「`-> dict[str, float]` を返す step 関数を切り出す原則」のみ。conftest fixture も GAN/Diff 別建て。→ T-M3.2 着手前にチケット記述を訂正すること。
+  - **`utils/` への共通化 refactor が未実施** (本 §8.1 で「M3.2 着手前必須」と採用昇格済だが現状 `train_gan.py` 内インライン)。`save_checkpoint`/`load_checkpoint`/`iter_forever`/`run_validation`/`log_scalars`/emergency save は GAN/Diff 共通。**M3.2 で `train_diff.py` を書く前に `utils/training_loop.py` (or `utils/checkpoint.py`) へ括り出す**。同時に未実装の `keep_last_n` rolling delete / config-drift 検知 / RNG 再現テスト も共通 util 側で実装・テストする。
+  - **MR-STFT config キー名の実バグを修正**: 本番 `gan_wavenext2.yaml` の `loss.mrstft.fft_sizes` は `MultiResolutionSTFTLoss(n_ffts=...)` と不一致で `**cfg` 展開時に TypeError だった → `n_ffts` に修正済。
+  - **config nested→flat マッピングの脆弱性 (M3.2/T-M5.1 着手前に対応)**: `GANWaveNext2.from_config(cfg["model"])` は `sub_model` の `hop`/`n_mels` を `SubModelGAN.from_config` の allowed-key (`hop_length`/`mel_channels`) で drop し既定値にフォールバック (GAN/Diff とも既定が yaml 値と一致するため偶然動作)。`build_loaders` は `["sub_model"]["hop"]` 直参照で二重命名。yaml キーをモデル引数名に揃えるか from_config に rename マップを 1 箇所集約する。
 
 ## 9. 後続タスクへの連絡事項
 

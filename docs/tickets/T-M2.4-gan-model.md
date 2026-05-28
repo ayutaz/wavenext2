@@ -622,6 +622,7 @@ class GANWaveNext2(nn.Module):
 - **`enable_grad_ckpt` は T-M2.4 レベルで実装**: 現 `SubModelGAN` / `WaveNextGenerator` は `enable_grad_ckpt` 引数を持たない (T-M1.4/T-M1.6 未実装)。ticket §8.1 採用案通り `torch.utils.checkpoint(sub, mel, y, use_reentrant=False)` を forward で挟む方式を採用し、sub-model 改修を回避。`test_enable_grad_ckpt_propagation` (sub-model 属性確認) は不適となり、flag 確認 + 出力等価性テストに置換。
 - 想定外: ticket の param 許容 (±0.05M) は embed kernel=1 確定 (+2.9%) 前の値。`test_sub_model.py` と同じ **±5% 相対許容** + 厳密 T 線形 (`n == T*15_427_674`) に変更。
 - 教訓: 完了済 component (T-M1.x) の API が ticket 記述の前提 (`enable_grad_ckpt` 引数、`from_config(mode=)`) と乖離している箇所は、consumer 側 (本チケット) で吸収し ticket §8.3 に明記する。
+- **✅ BaseVocoder/IterativeVocoder 抽出判断 (M2 phase review 2026-05-28 で確定): 抽出しない (GAN/Diff は 2 並列実装)**。§8.2/§9.1 が「M3.1 着手前に判断」とした項目。GAN `forward(mel, audio_length, return_intermediates)` は内部で zeros 初期化 + 逆順 fixed-point ループ → 波形を返す反復子。Diff `forward(mel, x_t, c, k)` は単一 sub-model k のステートレス dispatch (ループなし、ε を返す、reverse sampling は別メソッド)。両者は「反復子 vs dispatch」「初期化責務」「戻り値意味 (波形 vs ε)」が根本相違で、`forward(mel, **kwargs)` 統一は kwargs を opaque 化し再現実装の目的 (論文↔コード 1:1) を損なう。**共通化は loss/forward ではなく `utils/` の checkpoint/iter_forever/log_scalars/validation に限定** (T-M2.5 §8.3 参照)。
 
 ## 9. 後続タスクへの連絡事項
 

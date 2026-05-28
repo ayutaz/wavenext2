@@ -29,7 +29,7 @@
 
 > **補遺 (M1 phase review, 2026-05-27)**: 上表の一部「✅ 100%」は **論文本文では未記載で、参照実装 (FastDiff / Vocos) からの推定**であることが判明 (arXiv HTML §3 / Fig 2 を WebFetch で確認)。具体的には: (a) **mel と STFT-spec の結合方法** (concat→単一 conv か別経路か) §3.1 未記載、(b) **Diff conditioning が per-block 注入か 1 回か / additive か FiLM か** §3.3 未記載、(c) **embed の kernel/stride** 未記載、確認できたのは ConvNeXt n=8 のみ。Table 1 の param 数 (GAN sub-model=14.985M=WaveNeXt baseline 14.98M、Diff=14.42M) が唯一の客観証拠で、**per-block fc_t (2.1M) を含めると Diff が +14% 超過**し、fc_t 無し (または embed mel-only) なら一致する。
 
-> **解決 (2026-05-27 エージェントチーム調査)**: 上記 (b) conditioning 機構を確定 → **per-block fc_t 撤去**、共有 NoiseEmbedding を射影なしで各 block に additive 注入 (sub-model=14.354M, −0.46%)。詳細は §C7。残る (a) mel/STFT 結合方法と (c) embed kernel/stride は依然未記載で、現実装は concat→単一 conv (kernel=1) を採用。GAN sub-model が +2.9% 過大 (STFT concat 2048ch を embed に通すため) なのは (a)/(c) が論文と異なる可能性を示唆するが、STFT module は §3.1 の中核のため現設計を維持し、許容範囲として T-M2.4 レビューでフラグ。
+> **解決 (2026-05-27 エージェントチーム調査)**: 上記 (b) conditioning 機構を確定 → **per-block fc_t 撤去**、共有 NoiseEmbedding を射影なしで各 block に additive 注入 (sub-model=14.354M, −0.46%)。詳細は §C7。残る (a) mel/STFT 結合方法と (c) embed kernel/stride は依然未記載で、現実装は concat→単一 conv (kernel=1) を採用。GAN sub-model が +2.9% 過大 (STFT concat 2048ch を embed に通すため) なのは (a)/(c) が論文と異なる可能性を示唆するが、STFT module は §3.1 の中核のため現設計を維持し、許容範囲として T-M2.4 レビューでフラグ。**→ M2 phase review (2026-05-28) で「許容 (現設計維持) で確定、再評価不要」と決定** (別経路 embed は未確定自由度を増やすだけで再現性を上げないため不採用)。
 
 ---
 

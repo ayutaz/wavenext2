@@ -50,8 +50,8 @@ discriminator:
 loss:
   adversarial: hinge            # WaveFit-PT 実装
   fm_loss: l1
-  mrstft:
-    fft_sizes: [512, 1024, 2048]
+  mrstft:                        # キー名は MultiResolutionSTFTLoss.__init__ 引数に一致させる
+    n_ffts: [512, 1024, 2048]    # (旧 fft_sizes は **cfg で TypeError になるため修正、M2 review)
     win_lengths: [360, 900, 1800]
     hop_sizes: [80, 150, 300]
     eps: 1.0e-5
