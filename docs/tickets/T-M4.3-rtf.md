@@ -3,11 +3,11 @@ id: T-M4.3
 title: RTF 測定 (GPU A100 + CPU 1-core)
 milestone: M4
 phase: M4
-status: pending
+status: completed
 size: S
-owner: -
+owner: claude
 created: 2026-05-26
-updated: 2026-05-26
+updated: 2026-05-28
 depends_on: [T-M2.4, T-M3.1]
 blocks: []
 related_docs:
@@ -270,9 +270,13 @@ def measure_rtf(
 - **iter 数を model 設定に委ねる前提 (M4 フェーズレビュー)**: RTF を支配するのは反復数 ── GAN は fixed-point T 回 (論文 T=4 or 5)、Diff は 4 step。**同一 T で比較しないと論文 Table と整合しない**。`n_warmup` / `n_measure` (計測ループ回数) とは別概念であり、本関数は **iter 数を制御せず model config に従う** (`synthesize` 内部が T 回 / 4 step を実行) ことを明記。論文対比時は model 側の T を論文と揃える責務が呼び出し側 (T-M6.1/T-M6.2) にある
 - **`cudnn.benchmark` の扱い (M4 フェーズレビュー)**: `torch.backends.cudnn.benchmark=True` だと warmup 後も最初の数回 autotune が走り RTF が揺れる (warmup 回数との相互作用)。**RTF 測定時は `benchmark=False` 推奨**。`benchmark=True` を使うなら autotune 完了に十分な warmup 回数を確保すること。§6.1 に技術リスクとして併記
 
-### 8.3 学んだこと (チケット完了後に追記)
-- 想定外: TBD
-- 教訓: TBD
+### 8.3 学んだこと (2026-05-28 実装完了)
+
+- **GANWaveNext2.synthesize(mel) alias を本チケットで追加 (T-M2.4 申し送りの実行)**: §6.1/§9 の予告通り、GAN の `forward(mel, audio_length)` は第 2 引数必須ではないが (audio_length=None で auto-infer)、横断 dispatch を明示化するため `synthesize(mel) = forward(mel)` を追加。Diff は infer_diff の import 副作用で `synthesize = reverse_sample` が注入済み。`getattr(model, "synthesize", model.forward)` で両者を統一計測。
+- **RTF は GT 不要のため evaluate() facade backend に載せない**: MCD/F0/UTMOS/NISQA は GT 波形ペアを取るが RTF は model のみ。facade の `backend(pairs, sr)` signature と入力形が異なるため standalone 関数として提供 (§6.3 の指摘通り)。T-M6.1/6.2 が直接 `measure_rtf(model, mels)` を呼ぶ。
+- **mock で計測ロジックを完全検証 (GPU 不要)**: 固定 sleep mock で RTF 式 (sleep/audio_sec)、thread 観測 mock で 1-thread 制限と finally 復元、synthesize/forward mock で dispatch を CPU default tier で検証。CUDA events 経路は `@pytest.mark.gpu` で deselect (self-hosted A100 runner、§8.1 two-tier)。
+- **8 tests pass (slow GAN 結合は deselect)、ruff clean**。
+- 教訓: 速度計測は「計測ロジックの正しさ」(warmup 除外・thread 制限・式・dispatch・状態復元) と「実機での絶対値」を分離でき、前者は mock + CPU で網羅、後者は GPU runner に委ねる two-tier が効率的。グローバル状態 (`set_num_threads`) を触る関数は finally 復元 + 復元テストが必須。
 
 #### 再評価トリガー
 - **M6 本格訓練後の最終 RTF 報告** (T-M6.1 GPU 0.0066 / CPU 0.20 対比) 時に、A100 実測値と本関数の整合性を再評価。乖離があれば warmup 回数 / sync 位置を見直す

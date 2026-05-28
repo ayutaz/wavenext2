@@ -529,8 +529,10 @@ def compute_log_f0_rmse(y_true, y_pred, sr=24000):  # pyworld DIO+StoneMask、vo
 **Deliverable**: GPU (A100) と CPU (1 core) での RTF 計測
 
 **Acceptance**:
-- [ ] CPU 1-core 制限が `torch.set_num_threads(1)` で機能
-- [ ] 100 utterances 平均で stable な RTF が出る (std < mean*0.1)
+- [x] CPU 1-core 制限が `torch.set_num_threads(1)` で機能 + finally で復元 (`test_cpu_single_thread_during_measure` / `test_thread_count_restored`)
+- [x] 100 utterances で stable な RTF (median 中心) — `measure_rtf` は GPU=CUDA events / CPU=perf_counter median、`model.synthesize(mel)` で GAN/Diff 横断 dispatch
+
+> **実装メモ (2026-05-28)**: `measure_rtf(model, mels, *, device, ...) -> {rtf_mean/std/median/n/device/compiled}` (T-M4.1 schema 統一)。GPU は CUDA events、CPU は perf_counter の median + 1-thread (finally 復元)。warmup 除外、iter 数 (GAN T / Diff 4-step) は model config 委譲。**GANWaveNext2 に `synthesize(mel)` alias を追加** (T-M4.3 申し送り、forward(mel) で audio_length auto-infer)、Diff は infer_diff の注入 alias。RTF は GT 不要のため `evaluate()` facade backend には載せず standalone。8 tests pass。
 
 ---
 

@@ -98,6 +98,14 @@ class GANWaveNext2(nn.Module):
                 intermediates.append(y)
         return intermediates if return_intermediates else y
 
+    def synthesize(self, mel: torch.Tensor) -> torch.Tensor:
+        """推論用 alias (T-M4.3 RTF が GAN/Diff 横断で `model.synthesize(mel)` を呼ぶ)。
+
+        `forward(mel)` は audio_length=None で `T_mel*hop` を auto-infer するため、第 2 引数
+        必須問題を回避する thin wrapper。Diff 側は infer_diff が同名 alias を注入する。
+        """
+        return self.forward(mel)
+
     @staticmethod
     def _residual_update(y: torch.Tensor, n_t: torch.Tensor) -> torch.Tensor:
         """残差更新の単一情報源 (SoT)。パターン (A): `y_{t-1} = y_t - n_t`。
