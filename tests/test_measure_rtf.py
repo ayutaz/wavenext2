@@ -109,7 +109,11 @@ def test_rtf_formula() -> None:
     t_mel = 20
     sr = 24000
     out = measure_rtf(
-        _MockSynth(sleep=sleep), _mels(n=1, t_mel=t_mel), device="cpu", n_warmup=1, n_measure=5,
+        _MockSynth(sleep=sleep),
+        _mels(n=1, t_mel=t_mel),
+        device="cpu",
+        n_warmup=1,
+        n_measure=5,
         sample_rate=sr,
     )
     audio_sec = t_mel * 256 / sr

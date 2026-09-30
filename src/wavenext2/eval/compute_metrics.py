@@ -84,9 +84,7 @@ def compute_log_f0_rmse(
     b = _to_numpy_mono(y_pred)
 
     def _f0(y: np.ndarray) -> np.ndarray:
-        f0, t = pyworld.dio(
-            y, sr, f0_floor=f0_floor, f0_ceil=f0_ceil, frame_period=frame_period
-        )
+        f0, t = pyworld.dio(y, sr, f0_floor=f0_floor, f0_ceil=f0_ceil, frame_period=frame_period)
         return pyworld.stonemask(y, f0, t, sr)
 
     f0_a = _f0(a)

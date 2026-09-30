@@ -23,7 +23,9 @@ def main(argv: list[str] | None = None) -> int:
     from wavenext2.train.train_diff import build_sub_model_cfg
     from wavenext2.utils.config import load_config
 
-    parser = argparse.ArgumentParser(description="Evaluate Diff sub-model checkpoints via evaluate()")
+    parser = argparse.ArgumentParser(
+        description="Evaluate Diff sub-model checkpoints via evaluate()"
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--ckpt-dir", required=True, help="sub_{1..4}.pt を含む dir")
     parser.add_argument("--out", default="eval_results/diff_1epoch.json")

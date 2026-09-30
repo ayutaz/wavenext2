@@ -93,8 +93,15 @@ _GAN_CFG = {
     "seed": 0,
     "model": {
         "T": 1,
-        "sub_model": {"n_fft": 256, "hop": 64, "win_length": 256, "dim": 32,
-                      "intermediate_dim": 64, "n_blocks": 1, "kernel_size": 3},
+        "sub_model": {
+            "n_fft": 256,
+            "hop": 64,
+            "win_length": 256,
+            "dim": 32,
+            "intermediate_dim": 64,
+            "n_blocks": 1,
+            "kernel_size": 3,
+        },
     },
     "discriminator": {"num_D": 1, "ndf": 4, "layers": 2, "downsampling_factor": 4},
     "loss": {
@@ -104,8 +111,7 @@ _GAN_CFG = {
     "train": {
         "grad_clip_norm": 1.0,
         "max_steps": 4,
-        "optimizer": {"lr_g": 1.0e-4, "lr_d": 2.0e-4, "betas": [0.8, 0.99],
-                      "weight_decay": 1.0e-3},
+        "optimizer": {"lr_g": 1.0e-4, "lr_d": 2.0e-4, "betas": [0.8, 0.99], "weight_decay": 1.0e-3},
         "scheduler": {"type": "InverseLR", "inv_gamma": 200000, "power": 0.5, "warmup": 0.999},
     },
     "validation": {"interval_steps": 2},

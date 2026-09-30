@@ -29,7 +29,7 @@ SUB_CFG = {
 PARAM_PER_SUB = 14_354_434
 PARAM_TOTAL = 4 * PARAM_PER_SUB
 TABLE1_PER_SUB = 14.42e6  # 論文 Table 1 (Diff wo/ sub-model)
-TABLE1_TOTAL = 57.68e6    # 論文 Table 1 (Diff w/ sub-model)
+TABLE1_TOTAL = 57.68e6  # 論文 Table 1 (Diff w/ sub-model)
 
 
 @pytest.fixture(scope="module")
