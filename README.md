@@ -4,7 +4,7 @@
 
 - **論文**: https://arxiv.org/abs/2605.25506
 - **デモ (公式)**: https://37integer.github.io/WAVENEXT-2
-- **ステータス**: ドキュメント整備完了、実装着手前 (2026-05 時点)
+- **ステータス** (2026-05-28): M0〜M4 実装完了 + M5 (統合スモーク) 足場実装済み。M5 実行・M6 本格訓練・M7 主観評価・LibriTTS-R 取得 (T-M0.3) は GPU / データ認証を要するため未実施 (進捗は [`docs/tickets/index.md`](docs/tickets/index.md))
 
 ## このリポジトリは何か
 
@@ -47,7 +47,13 @@ uv sync
 uv run python --version    # Python 3.13.x
 ```
 
-依存: PyTorch >= 2.10 (Python 3.13 対応版), torchaudio, librosa, soundfile, pymcd, pyworld 等。
+依存: PyTorch >= 2.10 (Python 3.13 対応版), torchaudio, librosa, soundfile, pyworld 等 (MCD は外部依存を使わず librosa MFCC + 自前 DTW で実装)。`requires-python` は `>=3.13.13,<3.14`。
+
+テスト (CPU、`slow` / `gpu` マーカーは既定で除外):
+
+```bash
+uv run pytest -q
+```
 
 ### データセット
 
@@ -55,29 +61,39 @@ LibriTTS-R をユーザー自身でダウンロード:
 
 1. https://www.openslr.org/141/ にアクセスしライセンス (CC BY 4.0) に同意
 2. `train_clean_100.tar.gz`, `train_clean_360.tar.gz`, `test_clean.tar.gz` をダウンロード
-3. 展開先のパスを `configs/*.yaml` の `data.root` に設定
+3. 展開先のパスを `configs/*.yaml` の `data.root` / `data.root_dir` に設定
+4. filelist を生成: `uv run python scripts/prepare_libritts.py --src-dir <LibriTTS-R 展開ルート>`
 
 LibriTTS-R は本リポジトリには **含まれない** (約 50 GB)。
 
 ### 訓練
 
-実装完了後 (M2 / M3 以降):
+`pyproject.toml` の `[project.scripts]` (`train-gan` / `train-diff`) または `python -m wavenext2.train.*` で起動する (本格訓練は GPU 必須、M6)。
 
 ```bash
 # GAN-WaveNeXt 2
-uv run python -m src.train.train_gan --config configs/gan_wavenext2.yaml
+uv run train-gan --config configs/gan_wavenext2.yaml
 
 # Diff-WaveNeXt 2 (4 sub-models を順次)
 for k in 1 2 3 4; do
-    uv run python -m src.train.train_diff --config configs/diff_wavenext2.yaml --sub-model $k
+    uv run train-diff --config configs/diff_wavenext2.yaml --sub-model $k
 done
 ```
 
 ### 推論
 
+推論用の CLI は未実装 (`src/wavenext2/inference/infer_gan.py` は scaffold のスタブ)。現状は Python API から呼ぶ:
+
+- GAN: `wavenext2.models.gan_wavenext2.GANWaveNext2.synthesize(mel)` (zeros 初期化 + T 回 fixed-point iteration)
+- Diff: `wavenext2.inference.infer_diff.reverse_sample(model, mel, ...)` (4 sub-model の reverse sampling)
+
+学習済み checkpoint の客観評価 (MCD / log F0 RMSE) は `scripts/eval_gan_checkpoint.py` / `scripts/eval_diff_checkpoint.py` を使う:
+
 ```bash
-uv run python -m src.inference.infer_gan --ckpt checkpoints/gan/best.pt --mel path/to/mel.npy --out output.wav
-uv run python -m src.inference.infer_diff --ckpt-dir checkpoints/diff/ --mel path/to/mel.npy --out output.wav
+uv run python scripts/eval_gan_checkpoint.py --config configs/gan_wavenext2_1epoch.yaml \
+    --ckpt checkpoints/gan_1epoch/best.pt --out eval_results/gan_1epoch.json
+uv run python scripts/eval_diff_checkpoint.py --config configs/diff_wavenext2_1epoch.yaml \
+    --ckpt-dir checkpoints/diff_1epoch --out eval_results/diff_1epoch.json
 ```
 
 ## 参考実装
