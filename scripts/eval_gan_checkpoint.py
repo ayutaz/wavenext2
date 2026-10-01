@@ -26,7 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--out", default="eval_results/gan_1epoch.json")
     parser.add_argument(
-        "--metrics", nargs="+", default=["mcd", "log_f0_rmse"], help="評価指標 (utmos は要 speechmos)"
+        "--metrics",
+        nargs="+",
+        default=["mcd", "log_f0_rmse"],
+        help="評価指標 (utmos は要 speechmos)",
     )
     args = parser.parse_args(argv)
 

@@ -235,7 +235,9 @@ def test_noise_level_conditioning() -> None:
         a = model.sub_models[3](mel, x_t, torch.full((1,), lo, device=device))
         b = model.sub_models[3](mel, x_t, torch.full((1,), hi, device=device))
     cos = F.cosine_similarity(a.flatten(1), b.flatten(1), dim=1).mean().item()
-    assert cos < 0.99, f"NoiseEmbedding 無視の疑い: cos={cos:.4f} (T-M1.5/T-M1.1、c_rescale ablation)"
+    assert cos < 0.99, (
+        f"NoiseEmbedding 無視の疑い: cos={cos:.4f} (T-M1.5/T-M1.1、c_rescale ablation)"
+    )
 
 
 # --------------------------------------------------------------------------- #

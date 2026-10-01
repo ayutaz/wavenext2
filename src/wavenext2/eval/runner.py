@@ -61,7 +61,9 @@ class EvalResult:
         return cls(summary=payload["summary"], per_utterance=payload["per_utterance"])
 
 
-def _synthesize(model: Any, mel: torch.Tensor, audio_len: int, seed: int, post_filter) -> np.ndarray:
+def _synthesize(
+    model: Any, mel: torch.Tensor, audio_len: int, seed: int, post_filter
+) -> np.ndarray:
     """model 種別を検出して 1 utterance を合成し mono numpy を返す."""
     from wavenext2.models.diff_wavenext2 import DiffWaveNext2
 

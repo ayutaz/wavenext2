@@ -64,14 +64,18 @@ def render_report(mode: str, result: GateResult) -> str:
         lines.append(f"  [{'x' if ok else ' '}] {name}")
     if result.reasons:
         lines.append("FAIL 理由: " + ", ".join(result.reasons))
-    lines.append("※ 聴感 (sample audio 4 本) は別途人間が確認。最終 GO/NO-GO は user 承認 (課金前)。")
+    lines.append(
+        "※ 聴感 (sample audio 4 本) は別途人間が確認。最終 GO/NO-GO は user 承認 (課金前)。"
+    )
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="M5 統合スモーク divergence gate orchestrator")
     parser.add_argument("--mode", choices=["gan", "diff"], required=True)
-    parser.add_argument("--metrics-json", type=Path, required=True, help="訓練/eval が出力した metrics")
+    parser.add_argument(
+        "--metrics-json", type=Path, required=True, help="訓練/eval が出力した metrics"
+    )
     parser.add_argument("--out", type=Path, default=None, help="gate 結果 JSON 出力先")
     args = parser.parse_args(argv)
 
@@ -83,8 +87,12 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(
             json.dumps(
-                {"mode": args.mode, "passed": result.passed, "checks": result.checks,
-                 "reasons": result.reasons},
+                {
+                    "mode": args.mode,
+                    "passed": result.passed,
+                    "checks": result.checks,
+                    "reasons": result.reasons,
+                },
                 indent=2,
                 ensure_ascii=False,
             ),

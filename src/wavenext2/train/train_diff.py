@@ -142,9 +142,10 @@ def train_diff_step(
         sqrt_one_minus_abar = c_fp32
 
     # x_t = √ᾱ * x_0 + √(1-ᾱ) * ε (DDPM 標準形)
-    x_t = sqrt_abar.to(x_gt.dtype).unsqueeze(-1) * x_gt + sqrt_one_minus_abar.to(
-        x_gt.dtype
-    ).unsqueeze(-1) * eps
+    x_t = (
+        sqrt_abar.to(x_gt.dtype).unsqueeze(-1) * x_gt
+        + sqrt_one_minus_abar.to(x_gt.dtype).unsqueeze(-1) * eps
+    )
 
     # conditioning 入力のみ c_rescale を乗算 (diffusion math は raw c、T-M1.5 §9.1 ablation)。
     c_rescale = cfg.get("model", {}).get("noise_emb", {}).get("c_rescale", 1.0)
@@ -206,9 +207,10 @@ def run_validation_diff(
             c_val = torch.full((b,), c_scalar, device=device, dtype=torch.float32)
             abar = 1.0 - c_val**2
             sqrt_abar = torch.sqrt(abar)
-            x_t = sqrt_abar.to(x_gt.dtype).unsqueeze(-1) * x_gt + c_val.to(x_gt.dtype).unsqueeze(
-                -1
-            ) * eps
+            x_t = (
+                sqrt_abar.to(x_gt.dtype).unsqueeze(-1) * x_gt
+                + c_val.to(x_gt.dtype).unsqueeze(-1) * eps
+            )
             eps_pred = sub(mel, x_t, (c_val * c_rescale).to(x_gt.dtype))
             sums[tag] += F.mse_loss(eps_pred.float(), eps.float()).item() * b
         n += b
@@ -348,7 +350,12 @@ def main(argv: list[str] | None = None) -> None:
     writer = SummaryWriter(str(Path(cfg["logging"]["tensorboard_dir"]) / f"sub_{k}"))
     register_sigterm_handler(
         lambda: save_checkpoint(
-            ckpt_dir / f"emergency_step_{state.step}_sub_{k}.pt", model, opt, state, cfg, atomic=True
+            ckpt_dir / f"emergency_step_{state.step}_sub_{k}.pt",
+            model,
+            opt,
+            state,
+            cfg,
+            atomic=True,
         )
     )
 
